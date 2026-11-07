@@ -39,7 +39,7 @@ FALLBACK_MODELS = [
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "history.jsonl"
 
-# Parámetros del Cross-Encoder Re-ranking
+# Parámetros del LLM Re-ranking
 RERANK_MIN_SCORE: float = 0.45
 RERANK_TOP_N: int = 2
 

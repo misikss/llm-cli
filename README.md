@@ -26,8 +26,8 @@ flowchart TD
     subgraph RAGPipeline ["Pipeline RAG Completo (Solo cuando se necesita)"]
         QE["rewrite_query()<br/>(Desambiguación + Keywords BM25)"] --> Hybrid["Hybrid Search (BM25 + ChromaDB)"]
         Hybrid --> RRF["Reciprocal Rank Fusion (RRF)"]
-        RRF --> CrossEncoder["Cross-Encoder Re-ranking<br/>(Gemini Structured Output)"]
-        CrossEncoder --> FilterScore{"Score ≥ RERANK_MIN_SCORE (0.45)"}
+        RRF --> LLMReranker["LLM Re-ranking<br/>(Gemini Structured Output)"]
+        LLMReranker --> FilterScore{"Score ≥ RERANK_MIN_SCORE (0.45)"}
     end
     
     FilterScore --> LLMFinal["Generación Final Enriquecida"]
@@ -63,12 +63,13 @@ Cuando una consulta requiere memoria histórica (`rag_memory`), se activan los t
 1. **Query Engineering (`rewrite_query`)**:
    - Resuelve pronombres (*"¿cuándo llegó él?"* $\rightarrow$ *"¿cuándo llegó Lionel Messi?"*) y extrae palabras clave para el motor léxico.
 2. **Hybrid Search (BM25 + Vectorial) con RRF**:
-   - Búsqueda léxica precisa con `rank_bm25` (BM25Okapi).
+   - Búsqueda léxica precisa con `rank_bm25` (BM25Okapi), con índice cacheado e IDs estables para no reconstruir el corpus en cada consulta.
    - Búsqueda semántica densa con `gemini-embedding-2` en ChromaDB.
    - Fusión mediante Reciprocal Rank Fusion:
      $$RRF\_Score(d) = \sum_{m \in M} \frac{1}{60 + r_m(d)}$$
-3. **Cross-Encoder Re-ranking (`rerank_documents`)**:
+3. **LLM Re-ranking (`rerank_documents`)**:
    - Emplea `gemini-2.5-flash-lite` con Structured Output para evaluar la relevancia exacta de cada fragmento.
+   - Es un reranker basado en LLM, no un Cross-Encoder local; evita cargar otro modelo en RAM.
    - Parámetros centralizados en `config.py`: `RERANK_MIN_SCORE = 0.45` y `RERANK_TOP_N = 2`.
 
 ---
@@ -80,7 +81,7 @@ llm-cli/
 ├── config.py           ← Configuración global (.env), umbrales RERANK_MIN_SCORE y tabla de tarifas
 ├── models.py           ← Esquemas Pydantic (RouteDecision semántico, LLMResponse, CallMetrics)
 ├── tools.py            ← Herramientas ejecutables (Clima en tiempo real con Open-Meteo)
-├── rag.py              ← Advanced RAG (rewrite_query, BM25, RRF y Cross-Encoder Reranking)
+├── rag.py              ← Advanced RAG (rewrite_query, BM25, RRF y LLM Reranking)
 ├── memory.py           ← Memoria híbrida (RAM Working Memory + Episodic Memory en ChromaDB)
 ├── client.py           ← Lógica con Google GenAI SDK (Semantic Router Few-Shot, Grounding, Failover)
 ├── display.py          ← Renderizado de UI en consola con Rich y persistencia en JSONL

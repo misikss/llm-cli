@@ -19,6 +19,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
+from rag import BM25Index, RetrievalDocument
 
 
 class MemoryState(BaseModel):
@@ -49,6 +50,8 @@ class EpisodicMemory:
             metadata={"hnsw:space": "cosine"}
         )
         self.embedding_model = "gemini-embedding-2"
+        self._bm25_index: BM25Index | None = None
+        self._bm25_doc_count = -1
 
     def _get_embedding(self, genai_client: genai.Client, text: str) -> list[float]:
         """Calcula el vector de embedding usando gemini-embedding-2."""
@@ -88,17 +91,39 @@ class EpisodicMemory:
                     "timestamp": str(int(time.time()))
                 }]
             )
+            self._bm25_index = None
+            self._bm25_doc_count = -1
         except Exception:
             # Si falla la indexación en segundo plano, la conversación no se bloquea
             pass
 
-    def get_all_documents(self) -> list[str]:
-        """Obtiene todos los documentos almacenados para indexar en BM25."""
+    def get_all_documents(self) -> list[RetrievalDocument]:
+        """Obtiene documentos e IDs estables para indexar en BM25."""
         try:
             data = self.collection.get()
-            return data.get("documents", []) or []
+            ids = data.get("ids", []) or []
+            documents = data.get("documents", []) or []
+            return [
+                RetrievalDocument(id=str(memory_id), text=document)
+                for memory_id, document in zip(ids, documents)
+                if document
+            ]
         except Exception:
             return []
+
+    def get_bm25_index(self) -> BM25Index:
+        """Devuelve un índice BM25 cacheado e invalida el caché al crecer ChromaDB."""
+        try:
+            collection_count = self.collection.count()
+        except Exception:
+            collection_count = 0
+
+        if self._bm25_index is None or collection_count != self._bm25_doc_count:
+            documents = self.get_all_documents()
+            self._bm25_index = BM25Index(documents)
+            self._bm25_doc_count = collection_count
+
+        return self._bm25_index
 
     def retrieve_vector_candidates(
         self,
@@ -117,8 +142,14 @@ class EpisodicMemory:
                 query_embeddings=[query_vector],
                 n_results=min(n_results, count)
             )
-            if results and results.get("documents"):
-                return results["documents"][0]
+            if results and results.get("documents") and results.get("ids"):
+                documents = results["documents"][0]
+                ids = results["ids"][0]
+                return [
+                    RetrievalDocument(id=str(memory_id), text=document)
+                    for memory_id, document in zip(ids, documents)
+                    if document
+                ]
             return []
         except Exception:
             return []
@@ -188,7 +219,7 @@ class HybridMemory:
         keywords: list[str] | None = None
     ) -> tuple[str, int, int]:
         """
-        Construye el contexto usando Hybrid Search (Vectorial + BM25) y Cross-Encoder Reranking.
+        Construye el contexto usando Hybrid Search (Vectorial + BM25) y LLM Reranking.
         Retorna: (bloque_contexto, tokens_rerank_in, tokens_rerank_out).
         """
         context_parts = []
@@ -200,8 +231,8 @@ class HybridMemory:
         if wm:
             context_parts.append(wm.strip())
 
-        # 2. Hybrid Search (ChromaDB + BM25)
-        corpus_docs = self.episodic.get_all_documents()
+        # 2. Hybrid Search (ChromaDB + BM25 cacheado)
+        bm25_index = self.episodic.get_bm25_index()
         vector_candidates = self.episodic.retrieve_vector_candidates(genai_client, query, n_results=5)
 
         from rag import hybrid_search, rerank_documents
@@ -210,17 +241,19 @@ class HybridMemory:
         hybrid_candidates = hybrid_search(
             query_text=query,
             keywords=keywords or [],
-            corpus_docs=corpus_docs,
+            corpus_docs=bm25_index.documents,
             vector_results=vector_candidates,
-            top_k=4
+            top_k=4,
+            bm25_index=bm25_index,
         )
 
-        # 3. Cross-Encoder Reranking
+        # 3. LLM Reranking
         if hybrid_candidates:
+            candidate_texts = [document.text for document in hybrid_candidates]
             top_memories, tokens_rerank_in, tokens_rerank_out = rerank_documents(
                 client=genai_client,
                 query=query,
-                documents=hybrid_candidates,
+                documents=candidate_texts,
                 top_n=RERANK_TOP_N,
                 min_score=RERANK_MIN_SCORE,
             )
