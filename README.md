@@ -74,6 +74,48 @@ Cuando una consulta requiere memoria histórica (`rag_memory`), se activan los t
 
 ---
 
+## 📊 Benchmark de Retrieval
+
+El proyecto incluye un dataset sintético versionado en `benchmarks/retrieval_dataset.json` para comparar cuatro estrategias con relevancia esperada:
+
+```mermaid
+flowchart LR
+    Dataset["Dataset versionado<br/>corpus + queries etiquetadas"] --> BM25["BM25"]
+    Dataset --> Vector["Vectorial<br/>Gemini embeddings"]
+    Dataset --> Hybrid["Híbrido RRF"]
+    Dataset --> Reranker["Híbrido + LLM reranker"]
+    BM25 --> Metrics["Hit@1 · Hit@3 · MRR@3<br/>Latencia media"]
+    Vector --> Metrics
+    Hybrid --> Metrics
+    Reranker --> Metrics
+```
+
+El modo offline valida BM25 sin consumir API:
+
+```bash
+python benchmarks/retrieval_benchmark.py
+```
+
+El benchmark completo usa `gemini-embedding-2` para la búsqueda vectorial y Gemini para el reranking. No utiliza tus logs ni tu ChromaDB personal:
+
+```bash
+python benchmarks/retrieval_benchmark.py --live --output benchmarks/results.md
+```
+
+Si la cuota generativa está agotada, puedes medir embeddings, vectorial y RRF sin invocar el reranker:
+
+```bash
+python benchmarks/retrieval_benchmark.py --live --skip-reranker
+```
+
+Reporta `Hit@1`, `Hit@3`, `MRR@3`, latencia media y tokens usados por el reranker. El benchmark no aplica query rewriting para aislar la calidad del retrieval.
+
+Reportes generados: [`results-live-no-reranker.md`](benchmarks/results-live-no-reranker.md) y [`results-offline.md`](benchmarks/results-offline.md).
+
+La vista arquitectónica completa está en [`docs/architecture.md`](docs/architecture.md).
+
+---
+
 ## 📁 Arquitectura Modular del Proyecto
 
 ```
@@ -86,6 +128,9 @@ llm-cli/
 ├── client.py           ← Lógica con Google GenAI SDK (Semantic Router Few-Shot, Grounding, Failover)
 ├── display.py          ← Renderizado de UI en consola con Rich y persistencia en JSONL
 ├── llm_cli.py          ← Punto de entrada principal y bucle interactivo optimizado
+├── benchmarks/         ← Dataset y runner para evaluar retrieval
+├── docs/architecture.md ← Diagrama y decisiones de arquitectura
+├── tests/              ← Tests unitarios del retrieval
 ├── .env                ← Variables de entorno (GEMINI_API_KEY, GEMINI_MODEL)
 ├── requirements.txt    ← Dependencias necesarias
 └── chroma_db/          ← Base de datos vectorial persistente con embeddings

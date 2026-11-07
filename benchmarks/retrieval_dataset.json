@@ -1,0 +1,96 @@
+{
+  "name": "llm-cli retrieval benchmark v1",
+  "description": "Corpus sintético para comparar recuperación léxica, vectorial e híbrida sobre conceptos del proyecto.",
+  "corpus": [
+    {
+      "id": "memory-001",
+      "text": "BM25 realiza búsqueda léxica y favorece documentos que contienen los términos relevantes de la consulta. Es útil cuando el usuario usa nombres exactos, siglas o palabras técnicas."
+    },
+    {
+      "id": "memory-002",
+      "text": "ChromaDB almacena documentos y embeddings vectoriales para recuperar recuerdos semánticamente parecidos a una nueva pregunta."
+    },
+    {
+      "id": "memory-003",
+      "text": "El semantic router clasifica la intención antes de ejecutar RAG. Solo activa la memoria episódica cuando la consulta pide recuperar información histórica."
+    },
+    {
+      "id": "memory-004",
+      "text": "Open-Meteo proporciona geocodificación y datos meteorológicos actuales mediante una herramienta de function calling."
+    },
+    {
+      "id": "memory-005",
+      "text": "El LLM reranker recibe pocos candidatos híbridos y devuelve una puntuación estructurada de relevancia para filtrar los mejores fragmentos."
+    },
+    {
+      "id": "memory-006",
+      "text": "La Working Memory mantiene en RAM el sujeto activo y hechos recientes de la conversación para resolver referencias como él, eso o aquello."
+    },
+    {
+      "id": "memory-007",
+      "text": "Google Search Grounding permite consultar información dinámica de la web y devolver fuentes asociadas a la respuesta."
+    },
+    {
+      "id": "memory-008",
+      "text": "Reciprocal Rank Fusion combina rankings vectoriales y léxicos usando la posición de cada documento en lugar de mezclar directamente sus escalas de score."
+    },
+    {
+      "id": "memory-009",
+      "text": "Las métricas de uso registran tokens de entrada, salida, razonamiento, overhead de RAG y costo estimado por llamada."
+    },
+    {
+      "id": "memory-010",
+      "text": "La API de Gemini puede recibir imágenes, audio y documentos mediante contenido multimodal con MIME type y bytes."
+    },
+    {
+      "id": "memory-011",
+      "text": "Los tests unitarios deben validar tokenización, ranking BM25, fusión RRF y el comportamiento del retrieval híbrido con IDs estables."
+    },
+    {
+      "id": "memory-012",
+      "text": "El failover recorre varias API keys y modelos alternativos cuando Gemini devuelve errores temporales o agotamiento de cuota."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q01",
+      "question": "¿Cómo busco usando palabras exactas y nombres técnicos?",
+      "relevant_ids": ["memory-001"]
+    },
+    {
+      "id": "q02",
+      "question": "¿Dónde se guardan los vectores de los recuerdos?",
+      "relevant_ids": ["memory-002"]
+    },
+    {
+      "id": "q03",
+      "question": "¿Cuándo se activa la búsqueda de conversaciones anteriores?",
+      "relevant_ids": ["memory-003"]
+    },
+    {
+      "id": "q04",
+      "question": "¿Qué servicio consulta el clima actual?",
+      "relevant_ids": ["memory-004"]
+    },
+    {
+      "id": "q05",
+      "question": "¿Qué componente ordena los candidatos y asigna relevancia?",
+      "relevant_ids": ["memory-005"]
+    },
+    {
+      "id": "q06",
+      "question": "¿Cómo se combinan la búsqueda semántica y la búsqueda por palabras?",
+      "relevant_ids": ["memory-008", "memory-001", "memory-002"]
+    },
+    {
+      "id": "q07",
+      "question": "¿Cómo calculo el costo y los tokens usados por una consulta?",
+      "relevant_ids": ["memory-009"]
+    },
+    {
+      "id": "q08",
+      "question": "¿Puedo enviar una imagen o un PDF a Gemini?",
+      "relevant_ids": ["memory-010"]
+    }
+  ]
+}
