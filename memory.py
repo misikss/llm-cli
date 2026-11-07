@@ -19,6 +19,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
+from observability import capture_usage
 from rag import BM25Index, RetrievalDocument
 
 
@@ -56,12 +57,25 @@ class EpisodicMemory:
         self._bm25_index: BM25Index | None = None
         self._bm25_doc_count = -1
 
-    def _get_embedding(self, genai_client: genai.Client, text: str) -> list[float]:
+    def _get_embedding(
+        self,
+        genai_client: genai.Client,
+        text: str,
+        usage_sink: dict | None = None,
+    ) -> list[float]:
         """Calcula el vector de embedding usando gemini-embedding-2."""
         res = genai_client.models.embed_content(
             model=self.embedding_model,
             contents=text,
         )
+        if usage_sink is not None:
+            capture_usage(
+                usage_sink,
+                res,
+                model=self.embedding_model,
+                calls_key="calls",
+                prefix="embedding",
+            )
         return res.embeddings[0].values
 
     def store_memory(
@@ -70,7 +84,8 @@ class EpisodicMemory:
         question: str,
         answer: str,
         subject: str = "",
-        category: str = "general"
+        category: str = "general",
+        usage_sink: dict | None = None,
     ) -> None:
         """Guarda un recuerdo sintetizado de la interacción en ChromaDB."""
         # Filtramos saludos o textos vacíos
@@ -81,7 +96,7 @@ class EpisodicMemory:
         date_str = datetime.now().strftime("%Y-%m-%d")
         memory_text = f"[{date_str}] Tema: {subject or 'General'}. Pregunta: {question}. Respuesta: {answer[:300]}"
         try:
-            vector = self._get_embedding(genai_client, memory_text)
+            vector = self._get_embedding(genai_client, memory_text, usage_sink=usage_sink)
             memory_id = f"mem_{int(time.time())}_{uuid.uuid4().hex[:6]}"
             self.collection.add(
                 ids=[memory_id],
@@ -134,7 +149,8 @@ class EpisodicMemory:
         self,
         genai_client: genai.Client,
         query: str,
-        n_results: int = 5
+        n_results: int = 5,
+        usage_sink: dict | None = None,
     ) -> list[str]:
         """Recupera candidatos vectoriales para alimentar la búsqueda híbrida."""
         try:
@@ -142,7 +158,7 @@ class EpisodicMemory:
             if count == 0:
                 return []
 
-            query_vector = self._get_embedding(genai_client, query)
+            query_vector = self._get_embedding(genai_client, query, usage_sink=usage_sink)
             results = self.collection.query(
                 query_embeddings=[query_vector],
                 n_results=min(n_results, count)
@@ -165,7 +181,8 @@ class EpisodicMemory:
         genai_client: genai.Client,
         query: str,
         similarity_threshold: float = 0.40,
-        n_results: int = 2
+        n_results: int = 2,
+        usage_sink: dict | None = None,
     ) -> list[str]:
         """
         Recupera recuerdos del pasado SOLO si superan el umbral de similitud (distancia coseno < threshold).
@@ -176,7 +193,7 @@ class EpisodicMemory:
             if count == 0:
                 return []
 
-            query_vector = self._get_embedding(genai_client, query)
+            query_vector = self._get_embedding(genai_client, query, usage_sink=usage_sink)
             results = self.collection.query(
                 query_embeddings=[query_vector],
                 n_results=min(n_results, count)
@@ -223,7 +240,8 @@ class HybridMemory:
         self,
         genai_client: genai.Client,
         query: str,
-        keywords: list[str] | None = None
+        keywords: list[str] | None = None,
+        usage_sink: dict | None = None,
     ) -> tuple[str, int, int]:
         """
         Construye el contexto usando Hybrid Search (Vectorial + BM25) y LLM Reranking.
@@ -240,7 +258,12 @@ class HybridMemory:
 
         # 2. Hybrid Search (ChromaDB + BM25 cacheado)
         bm25_index = self.episodic.get_bm25_index()
-        vector_candidates = self.episodic.retrieve_vector_candidates(genai_client, query, n_results=5)
+        vector_candidates = self.episodic.retrieve_vector_candidates(
+            genai_client,
+            query,
+            n_results=5,
+            usage_sink=usage_sink,
+        )
 
         from rag import hybrid_search, rerank_documents
         from config import RERANK_MIN_SCORE, RERANK_TOP_N
@@ -263,6 +286,7 @@ class HybridMemory:
                 documents=candidate_texts,
                 top_n=RERANK_TOP_N,
                 min_score=RERANK_MIN_SCORE,
+                usage_sink=usage_sink,
             )
             if top_memories:
                 recalled_text = " | ".join(top_memories)
@@ -278,7 +302,8 @@ class HybridMemory:
         genai_client: genai.Client,
         user_message: str,
         model_answer: str,
-        category: str = "general"
+        category: str = "general",
+        usage_sink: dict | None = None,
     ) -> None:
         """
         Actualiza tanto la Working Memory como la Memoria Episódica en ChromaDB.
@@ -303,7 +328,15 @@ class HybridMemory:
                 response_schema=MemoryState,
                 temperature=0.0,
             )
-            res, _ = call_with_fallback(genai_client, update_prompt, config)
+            res, model_name = call_with_fallback(genai_client, update_prompt, config)
+            if usage_sink is not None:
+                capture_usage(
+                    usage_sink,
+                    res,
+                    model=model_name,
+                    calls_key="calls",
+                    prefix="llm",
+                )
             if res.parsed:
                 st: MemoryState = res.parsed
                 if st.active_subject:
@@ -330,6 +363,7 @@ class HybridMemory:
             answer=model_answer,
             subject=detected_subject,
             category=category,
+            usage_sink=usage_sink,
         )
 
     def reset(self) -> None:

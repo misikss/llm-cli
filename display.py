@@ -88,11 +88,26 @@ def display_response(validated: LLMResponse, metrics: CallMetrics) -> None:
 
     table.add_row("Tokens entrada (prompt)", f"{metrics.tokens_entrada:,}")
     table.add_row("Tokens salida (respuesta)", f"{metrics.tokens_salida:,}")
+    if metrics.tokens_router_in + metrics.tokens_router_out > 0:
+        table.add_row(
+            "Tokens semantic router",
+            f"{metrics.tokens_router_in + metrics.tokens_router_out:,}",
+        )
+    if metrics.tokens_memory_update_in + metrics.tokens_memory_update_out > 0:
+        table.add_row(
+            "Tokens memory update",
+            f"{metrics.tokens_memory_update_in + metrics.tokens_memory_update_out:,}",
+        )
+    if metrics.embedding_calls:
+        embedding_tokens = metrics.tokens_embedding_in + metrics.tokens_embedding_out
+        value = f"{embedding_tokens:,}" if embedding_tokens else "usage no expuesto"
+        table.add_row("Embeddings / llamadas", f"{metrics.embedding_calls} / {value}")
     if metrics.tokens_thinking > 0:
         table.add_row("Tokens thinking (razonamiento)", f"{metrics.tokens_thinking:,}")
     if (metrics.tokens_query_eng_in + metrics.tokens_rerank_in) > 0:
         table.add_row("Tokens overhead (QueryEng + Rerank)", f"{metrics.tokens_query_eng_in + metrics.tokens_query_eng_out + metrics.tokens_rerank_in + metrics.tokens_rerank_out:,}")
     table.add_row("Tokens totales", f"[bold]{metrics.tokens_totales:,}[/bold]")
+    table.add_row("Cobertura de tokens", metrics.token_usage_scope)
 
     table.add_section()
     table.add_row("Tarifa entrada (USD/1M)", f"${metrics.tarifa_input_por_millon:.4f}")

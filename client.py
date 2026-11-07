@@ -20,6 +20,7 @@ from config import (
 from models import LLMResponse, CallMetrics, RouteDecision
 from tools import get_current_weather
 from errors import ProviderError, classify_provider_error
+from observability import capture_usage
 
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,8 @@ def determine_route(
     client: genai.Client,
     question: str,
     active_subject: str = "",
-    recent_context: str = ""
+    recent_context: str = "",
+    usage_sink: dict | None = None,
 ) -> RouteDecision:
     """
     Router semántico con Few-Shot Learning y Structured Outputs:
@@ -160,7 +162,9 @@ def determine_route(
             response_schema=RouteDecision,
             temperature=0.0,
         )
-        res, _ = call_with_fallback(client, router_prompt, config)
+        res, model_name = call_with_fallback(client, router_prompt, config)
+        if usage_sink is not None:
+            capture_usage(usage_sink, res, model=model_name)
         if res.parsed:
             return res.parsed
     except Exception as exc:

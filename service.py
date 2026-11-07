@@ -62,6 +62,7 @@ class AssistantService:
         try:
             active_subject = self.memory.active_subject
             recent_context = "; ".join(self.memory.key_facts)
+            route_usage: dict = {}
 
             with trace.stage("route", source=route_source) as event:
                 if request.use_weather:
@@ -84,6 +85,7 @@ class AssistantService:
                         question=question,
                         active_subject=active_subject,
                         recent_context=recent_context,
+                        usage_sink=route_usage,
                     )
                     if route_decision.reason.startswith("Fallback"):
                         route_source = "fallback"
@@ -96,6 +98,9 @@ class AssistantService:
                     "route": route_decision.route,
                     "confidence": route_decision.confidence,
                 })
+                event["model"] = route_usage.get("model")
+                event["input_tokens"] = route_usage.get("input_tokens", 0)
+                event["output_tokens"] = route_usage.get("output_tokens", 0)
 
             rag_tokens = {
                 "query_eng_in": 0,
@@ -103,6 +108,8 @@ class AssistantService:
                 "rerank_in": 0,
                 "rerank_out": 0,
             }
+            rewrite_usage: dict = {}
+            retrieval_usage: dict = {}
 
             if route_decision.needs_memory_rag:
                 with trace.stage("query_rewrite") as event:
@@ -111,22 +118,32 @@ class AssistantService:
                         question=question,
                         active_subject=active_subject,
                         recent_context=recent_context,
+                        usage_sink=rewrite_usage,
                     )
                     rag_tokens["query_eng_in"] = t_qe_in
                     rag_tokens["query_eng_out"] = t_qe_out
                     event["input_tokens"] = t_qe_in
                     event["output_tokens"] = t_qe_out
+                    event["model"] = rewrite_usage.get("model")
 
                 with trace.stage("retrieval") as event:
                     context_prefix, t_rr_in, t_rr_out = self.memory.get_context_prompt(
                         self.client,
                         query=rewritten.rewritten_query,
                         keywords=rewritten.search_keywords,
+                        usage_sink=retrieval_usage,
                     )
                     rag_tokens["rerank_in"] = t_rr_in
                     rag_tokens["rerank_out"] = t_rr_out
                     event["input_tokens"] = t_rr_in
                     event["output_tokens"] = t_rr_out
+                    event["model"] = retrieval_usage.get("model")
+                    event["metadata"].update({
+                        "embedding_calls": retrieval_usage.get("embedding_calls", 0),
+                        "embedding_input_tokens": retrieval_usage.get("embedding_input_tokens", 0),
+                        "embedding_output_tokens": retrieval_usage.get("embedding_output_tokens", 0),
+                        "embedding_usage_available": retrieval_usage.get("embedding_usage_available"),
+                    })
             else:
                 with trace.stage("working_memory") as event:
                     context_prefix = self.memory.get_working_memory_context()
@@ -153,7 +170,8 @@ class AssistantService:
                         selected_model=metrics.model,
                     )
 
-            with trace.stage("memory_update"):
+            memory_usage: dict = {}
+            with trace.stage("memory_update") as event:
                 category = (
                     "actualidad_efimera"
                     if route_decision.is_ephemeral
@@ -164,9 +182,59 @@ class AssistantService:
                     question,
                     validated.answer,
                     category=category,
+                    usage_sink=memory_usage,
                 )
+                event["model"] = memory_usage.get("llm_model")
+                event["input_tokens"] = memory_usage.get("llm_input_tokens", 0)
+                event["output_tokens"] = memory_usage.get("llm_output_tokens", 0)
+                event["metadata"].update({
+                    "embedding_calls": memory_usage.get("embedding_calls", 0),
+                    "embedding_input_tokens": memory_usage.get("embedding_input_tokens", 0),
+                    "embedding_output_tokens": memory_usage.get("embedding_output_tokens", 0),
+                    "embedding_usage_available": memory_usage.get("embedding_usage_available"),
+                })
 
             metrics.routed_as = route_decision.route
+            metrics.tokens_router_in = route_usage.get("input_tokens", 0)
+            metrics.tokens_router_out = route_usage.get("output_tokens", 0)
+            metrics.tokens_memory_update_in = memory_usage.get("llm_input_tokens", 0)
+            metrics.tokens_memory_update_out = memory_usage.get("llm_output_tokens", 0)
+            metrics.tokens_embedding_in = (
+                retrieval_usage.get("embedding_input_tokens", 0)
+                if route_decision.needs_memory_rag
+                else 0
+            ) + memory_usage.get("embedding_input_tokens", 0)
+            metrics.tokens_embedding_out = (
+                retrieval_usage.get("embedding_output_tokens", 0)
+                if route_decision.needs_memory_rag
+                else 0
+            ) + memory_usage.get("embedding_output_tokens", 0)
+            metrics.embedding_calls = (
+                retrieval_usage.get("embedding_calls", 0)
+                if route_decision.needs_memory_rag
+                else 0
+            ) + memory_usage.get("embedding_calls", 0)
+            metrics.tokens_totales += (
+                metrics.tokens_router_in
+                + metrics.tokens_router_out
+                + metrics.tokens_memory_update_in
+                + metrics.tokens_memory_update_out
+                + metrics.tokens_embedding_in
+                + metrics.tokens_embedding_out
+            )
+            usage_available = all([
+                route_usage.get("usage_available", True),
+                rewrite_usage.get("usage_available", True),
+                memory_usage.get("llm_usage_available", True),
+                retrieval_usage.get("usage_available", True)
+                if route_decision.needs_memory_rag
+                else True,
+                memory_usage.get("embedding_usage_available", True),
+                retrieval_usage.get("embedding_usage_available", True)
+                if route_decision.needs_memory_rag
+                else True,
+            ])
+            metrics.token_usage_scope = "pipeline" if usage_available else "pipeline_partial"
             trace.apply_to_metrics(metrics, route_source=route_source)
             return AskResult(
                 response=validated,

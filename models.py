@@ -109,6 +109,13 @@ class CallMetrics(BaseModel):
     tokens_query_eng_out: int = 0
     tokens_rerank_in: int = 0
     tokens_rerank_out: int = 0
+    tokens_router_in: int = 0
+    tokens_router_out: int = 0
+    tokens_memory_update_in: int = 0
+    tokens_memory_update_out: int = 0
+    tokens_embedding_in: int = 0
+    tokens_embedding_out: int = 0
+    embedding_calls: int = 0
     tokens_totales: int
 
     # Tarifas aplicadas (USD por 1M tokens)
@@ -131,6 +138,7 @@ class CallMetrics(BaseModel):
     request_started_at: str | None = None
     total_latency_ms: float = 0.0
     route_source: Literal["llm", "manual", "fallback"] = "llm"
+    token_usage_scope: Literal["generation", "pipeline", "pipeline_partial"] = "generation"
     stage_metrics: list[StageMetric] = Field(default_factory=list)
     errors: list[ErrorMetric] = Field(default_factory=list)
     fallbacks: list[dict[str, Any]] = Field(default_factory=list)

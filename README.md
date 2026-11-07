@@ -141,7 +141,7 @@ llm-cli/
 
 La CLI solo gestiona argumentos, input y presentación. `AssistantService` coordina el routing, el retrieval, la generación y la actualización de memoria, por lo que la misma lógica puede reutilizarse más adelante desde una API.
 
-Cada llamada exitosa registra un `trace_id`, latencia total, etapas (`route`, `retrieval`, `generation`, `memory_update`), tokens, fallbacks y errores sanitizados en `logs/history.jsonl`. Los fallos de solicitudes se registran en `logs/errors.jsonl`.
+Cada llamada exitosa registra un `trace_id`, latencia total, etapas (`route`, `query_rewrite`, `retrieval`, `generation`, `memory_update`), tokens, fallbacks y errores sanitizados en `logs/history.jsonl`. Los fallos de solicitudes se registran en `logs/errors.jsonl`.
 
 ---
 
@@ -179,5 +179,8 @@ python llm_cli.py --modelos
 ## 💰 Medición Precisa del ROI en Tokens
 
 Cada llamada registra en [`logs/history.jsonl`](file:///c:/Users/victor/Downloads/aiengineer/logs/history.jsonl):
-- Si la llamada es directa o web: el overhead de RAG es **0 tokens ($0.00000000 USD)**.
-- Si la llamada activa memoria episódica: desglosa los tokens de Query Engineering y Re-ranking por separado en la tabla Rich.
+- Tokens del semantic router, query rewriting, LLM reranker, generación final y actualización de memoria.
+- Cantidad de llamadas de embedding y sus tokens cuando el SDK expone `usage_metadata`.
+- `token_usage_scope`: `pipeline` cuando todas las etapas reportan usage, o `pipeline_partial` cuando el proveedor no expone tokens de alguna etapa.
+- La latencia se desglosa por etapa para distinguir costo de API, retrieval local y persistencia.
+- El overhead RAG sigue siendo **0 tokens** para rutas que no activan memoria episódica, aunque el router y la actualización de memoria pueden realizar llamadas propias.

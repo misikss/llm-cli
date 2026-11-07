@@ -41,6 +41,7 @@ flowchart TD
 - `llm_cli.py` no contiene la lógica del caso de uso: solo convierte argumentos/input en `AskRequest` y presenta `AskResult`.
 - Los errores se clasifican como configuración, proveedor, cuota, modelo no disponible, retrieval, memoria o tool execution.
 - Cada solicitud produce un `trace_id` y registra latencia por etapa sin persistir secretos completos.
+- La medición de tokens cubre router, query rewriting, reranker, generación y memory update; embeddings registran cantidad de llamadas y tokens si el SDK los expone.
 
 ## Evaluación
 

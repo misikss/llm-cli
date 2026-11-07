@@ -17,6 +17,40 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def capture_usage(
+    sink: dict[str, Any],
+    response: Any,
+    *,
+    model: str | None = None,
+    calls_key: str = "calls",
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Extrae usage_metadata del SDK y lo acumula sin asumir que siempre exista."""
+    usage = getattr(response, "usage_metadata", None)
+    input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+    output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+    total_tokens = int(
+        getattr(usage, "total_token_count", 0)
+        or (input_tokens + output_tokens)
+    )
+    key_prefix = f"{prefix}_" if prefix else ""
+    sink[f"{key_prefix}input_tokens"] = sink.get(f"{key_prefix}input_tokens", 0) + input_tokens
+    sink[f"{key_prefix}output_tokens"] = sink.get(f"{key_prefix}output_tokens", 0) + output_tokens
+    sink[f"{key_prefix}total_tokens"] = sink.get(f"{key_prefix}total_tokens", 0) + total_tokens
+    sink[f"{key_prefix}{calls_key}"] = sink.get(f"{key_prefix}{calls_key}", 0) + 1
+    usage_key = f"{key_prefix}usage_available"
+    sink[usage_key] = sink.get(usage_key, True) and usage is not None
+    if model:
+        sink[f"{key_prefix}model"] = model
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "usage_available": usage is not None,
+        "model": model,
+    }
+
+
 class RequestTrace:
     """Acumula etapas, errores y fallbacks de una solicitud completa."""
 

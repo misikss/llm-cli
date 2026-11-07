@@ -16,6 +16,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from config import GEMINI_MODEL, RERANK_MIN_SCORE, RERANK_TOP_N
+from observability import capture_usage
 
 
 logger = logging.getLogger(__name__)
@@ -119,7 +120,8 @@ def rewrite_query(
     client: genai.Client,
     question: str,
     active_subject: str = "",
-    recent_context: str = ""
+    recent_context: str = "",
+    usage_sink: dict | None = None,
 ) -> tuple[RewrittenQuery, int, int]:
     """
     Transforma preguntas ambiguas ('¿cuándo llegó él?', '¿cuánto cuesta eso?') en
@@ -148,10 +150,15 @@ def rewrite_query(
             response_schema=RewrittenQuery,
             temperature=0.0,
         )
-        res, _ = call_with_fallback(client, prompt, config)
-        uso = res.usage_metadata
-        t_in = getattr(uso, "prompt_token_count", 0) or 0
-        t_out = getattr(uso, "candidates_token_count", 0) or 0
+        res, model_name = call_with_fallback(client, prompt, config)
+        usage = capture_usage(usage_sink, res, model=model_name) if usage_sink is not None else None
+        if usage is not None:
+            t_in = usage["input_tokens"]
+            t_out = usage["output_tokens"]
+        else:
+            uso = res.usage_metadata
+            t_in = getattr(uso, "prompt_token_count", 0) or 0
+            t_out = getattr(uso, "candidates_token_count", 0) or 0
 
         if res.parsed:
             return res.parsed, t_in, t_out
@@ -237,7 +244,8 @@ def rerank_documents(
     query: str,
     documents: list[str],
     top_n: int = RERANK_TOP_N,
-    min_score: float = RERANK_MIN_SCORE
+    min_score: float = RERANK_MIN_SCORE,
+    usage_sink: dict | None = None,
 ) -> tuple[list[str], int, int]:
     """
     Aplica reordenamiento basado en LLM sobre los candidatos híbridos.
@@ -268,10 +276,15 @@ def rerank_documents(
             response_schema=RerankResult,
             temperature=0.0,
         )
-        res, _ = call_with_fallback(client, prompt, config)
-        uso = res.usage_metadata
-        t_in = getattr(uso, "prompt_token_count", 0) or 0
-        t_out = getattr(uso, "candidates_token_count", 0) or 0
+        res, model_name = call_with_fallback(client, prompt, config)
+        usage = capture_usage(usage_sink, res, model=model_name) if usage_sink is not None else None
+        if usage is not None:
+            t_in = usage["input_tokens"]
+            t_out = usage["output_tokens"]
+        else:
+            uso = res.usage_metadata
+            t_in = getattr(uso, "prompt_token_count", 0) or 0
+            t_out = getattr(uso, "candidates_token_count", 0) or 0
 
         if res.parsed:
             rerank_data: RerankResult = res.parsed
