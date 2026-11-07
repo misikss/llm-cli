@@ -1,0 +1,100 @@
+"""
+models.py — Esquemas de validación con Pydantic para entradas, salidas y métricas.
+"""
+
+from typing import Literal
+from pydantic import BaseModel, Field, field_validator
+
+
+class RouteDecision(BaseModel):
+    """Decisión de enrutamiento unificada y semántica."""
+    route: Literal["general", "weather", "web_grounding", "rag_memory"] = Field(
+        ...,
+        description="Ruta seleccionada según la intención: "
+                    "'web_grounding' para temas dinámicos, novedades, tendencias o estado del arte en tiempo real; "
+                    "'weather' para meteorología; "
+                    "'rag_memory' si requiere buscar recuerdos de conversaciones pasadas en ChromaDB; "
+                    "'general' para explicaciones atemporales, razonamiento, creatividad o código directo."
+    )
+    is_ephemeral: bool = Field(
+        default=False,
+        description="True si la información solicitada es volátil/pasajera (clima de hoy, eventos en vivo, cotizaciones)."
+    )
+    needs_memory_rag: bool = Field(
+        default=False,
+        description="True ÚNICAMENTE si la consulta requiere buscar recuerdos en la base vectorial ChromaDB."
+    )
+    reason: str = Field(..., description="Justificación breve de la decisión de enrutamiento.")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Nivel de certidumbre en la clasificación.")
+
+
+class LLMResponse(BaseModel):
+    """Estructura que esperamos que Gemini devuelva en cada respuesta."""
+    answer: str = Field(
+        ...,
+        description="Respuesta principal a la pregunta del usuario"
+    )
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Nivel de confianza del modelo (0.0 = nada seguro, 1.0 = muy seguro)"
+    )
+    key_points: list[str] = Field(
+        default_factory=list,
+        description="Lista de puntos clave de la respuesta (máximo 5)"
+    )
+    category: str = Field(
+        ...,
+        description="Categoría de la pregunta: tecnología, ciencia, historia, cultura, clima, actualidad, otro"
+    )
+    sources_suggested: list[str] = Field(
+        default_factory=list,
+        description="Fuentes sugeridas o enlaces de grounding consultados"
+    )
+
+    @field_validator("confidence")
+    @classmethod
+    def validate_confidence(cls, v: float) -> float:
+        return round(v, 2)
+
+    @field_validator("key_points")
+    @classmethod
+    def limit_key_points(cls, v: list[str]) -> list[str]:
+        return v[:5]
+
+
+class CallMetrics(BaseModel):
+    """Métricas de uso y costo de una llamada a la API."""
+    timestamp: str
+    model: str
+    question: str
+    file_attached: str | None = None
+    routed_as: str = "general"
+    grounding_used: bool = False
+    grounding_sources: list[str] = Field(default_factory=list)
+
+    # Tokens exactos extraídos de usage_metadata (Auditoría completa)
+    tokens_entrada: int
+    tokens_salida: int
+    tokens_thinking: int = 0
+    tokens_query_eng_in: int = 0
+    tokens_query_eng_out: int = 0
+    tokens_rerank_in: int = 0
+    tokens_rerank_out: int = 0
+    tokens_totales: int
+
+    # Tarifas aplicadas (USD por 1M tokens)
+    tarifa_input_por_millon: float
+    tarifa_output_por_millon: float
+    tarifa_thinking_por_millon: float = 0.0
+
+    # Costos calculados (USD)
+    costo_entrada_usd: float
+    costo_salida_usd: float
+    costo_thinking_usd: float = 0.0
+    costo_rag_overhead_usd: float = 0.0
+    costo_total_usd: float
+
+    response: dict  # La respuesta validada como dict
+

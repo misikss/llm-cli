@@ -1,0 +1,160 @@
+"""
+display.py — Renderizado de consola con Rich y gestión de historial/estadísticas.
+"""
+
+import json
+from pathlib import Path
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from config import LOG_DIR, LOG_FILE, PRECIOS_MODELO, GEMINI_MODEL
+from models import LLMResponse, CallMetrics
+
+console = Console(force_terminal=True, highlight=False)
+
+
+def save_to_log(metrics: CallMetrics) -> None:
+    """Guarda las métricas en logs/history.jsonl."""
+    LOG_DIR.mkdir(exist_ok=True)
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(metrics.model_dump_json() + "\n")
+
+
+def display_response(validated: LLMResponse, metrics: CallMetrics) -> None:
+    """Imprime la respuesta estructurada y las métricas en terminal."""
+    console.print()
+    console.print(Panel(
+        f"[bold white]{validated.answer}[/bold white]",
+        title=f"[bold cyan]>> Respuesta de {metrics.model}[/bold cyan]",
+        subtitle=f"[dim]Categoria: {validated.category} | Confianza: {validated.confidence:.0%}[/dim]",
+        border_style="cyan",
+        padding=(1, 2),
+    ))
+
+    if validated.key_points:
+        console.print("\n[bold yellow]Puntos clave:[/bold yellow]")
+        for i, point in enumerate(validated.key_points, 1):
+            console.print(f"  [cyan]{i}.[/cyan] {point}")
+
+    if validated.sources_suggested:
+        console.print("\n[bold blue]Fuentes sugeridas / Grounding:[/bold blue]")
+        for src in validated.sources_suggested:
+            console.print(f"  - {src}")
+
+    console.print()
+    table = Table(title=f"Metricas — {metrics.model}", border_style="dim")
+    table.add_column("Metrica", style="bold", min_width=28)
+    table.add_column("Valor", justify="right", min_width=18)
+
+    if metrics.file_attached:
+        table.add_row("Archivo adjunto", f"[cyan]{Path(metrics.file_attached).name}[/cyan]")
+    table.add_row("Enrutado como (Auto-route)", f"[bold magenta]{metrics.routed_as}[/bold magenta]")
+    if metrics.grounding_used:
+        table.add_row("Modo Grounding / Tool", "[bold green]Activo (En tiempo real)[/bold green]")
+
+    table.add_row("Tokens entrada (prompt)", f"{metrics.tokens_entrada:,}")
+    table.add_row("Tokens salida (respuesta)", f"{metrics.tokens_salida:,}")
+    if metrics.tokens_thinking > 0:
+        table.add_row("Tokens thinking (razonamiento)", f"{metrics.tokens_thinking:,}")
+    if (metrics.tokens_query_eng_in + metrics.tokens_rerank_in) > 0:
+        table.add_row("Tokens overhead (QueryEng + Rerank)", f"{metrics.tokens_query_eng_in + metrics.tokens_query_eng_out + metrics.tokens_rerank_in + metrics.tokens_rerank_out:,}")
+    table.add_row("Tokens totales", f"[bold]{metrics.tokens_totales:,}[/bold]")
+
+    table.add_section()
+    table.add_row("Tarifa entrada (USD/1M)", f"${metrics.tarifa_input_por_millon:.4f}")
+    table.add_row("Tarifa salida  (USD/1M)", f"${metrics.tarifa_output_por_millon:.4f}")
+    if metrics.tarifa_thinking_por_millon > 0:
+        table.add_row("Tarifa thinking (USD/1M)", f"${metrics.tarifa_thinking_por_millon:.4f}")
+
+    table.add_section()
+    table.add_row("Costo entrada", f"${metrics.costo_entrada_usd:.8f}")
+    table.add_row("Costo salida", f"${metrics.costo_salida_usd:.8f}")
+    if metrics.tokens_thinking > 0:
+        table.add_row("Costo thinking", f"${metrics.costo_thinking_usd:.8f}")
+    if metrics.costo_rag_overhead_usd > 0:
+        table.add_row("Costo overhead RAG", f"${metrics.costo_rag_overhead_usd:.8f}")
+    table.add_row("Costo total", f"[bold green]${metrics.costo_total_usd:.8f} USD[/bold green]")
+
+    console.print(table)
+    console.print(f"[dim]Log guardado en: {LOG_FILE.resolve()}[/dim]\n")
+
+
+def show_precios() -> None:
+    """Muestra la tabla de precios por modelo."""
+    table = Table(title="Tabla de precios Gemini (USD / 1M tokens)", border_style="cyan")
+    table.add_column("Modelo", style="bold", min_width=24)
+    table.add_column("Input (USD/1M)", justify="right", min_width=16)
+    table.add_column("Output (USD/1M)", justify="right", min_width=16)
+    table.add_column("Thinking (USD/1M)", justify="right", min_width=18)
+    table.add_column("Activo", justify="center", min_width=8)
+
+    for nombre, tarifas in PRECIOS_MODELO.items():
+        es_activo = nombre in GEMINI_MODEL or GEMINI_MODEL in nombre
+        marca = "[bold green]<-- activo[/bold green]" if es_activo else ""
+        estilo = "bold green" if es_activo else ""
+        thinking = tarifas.get("output_thinking", 0.0)
+        table.add_row(
+            f"[{estilo}]{nombre}[/{estilo}]" if estilo else nombre,
+            f"${tarifas['input']:.4f}",
+            f"${tarifas['output']:.4f}",
+            f"${thinking:.4f}" if thinking > 0 else "[dim]-[/dim]",
+            marca,
+        )
+
+    console.print()
+    console.print(table)
+    console.print("[dim]Fuente: https://ai.google.dev/pricing[/dim]")
+    console.print(f"[dim]Modelo activo: {GEMINI_MODEL}[/dim]\n")
+
+
+def show_history(limit: int = 10) -> None:
+    """Muestra las últimas N llamadas del historial."""
+    if not LOG_FILE.exists():
+        console.print("[yellow]No hay historial todavía.[/yellow]")
+        return
+
+    lines = LOG_FILE.read_text(encoding="utf-8").strip().split("\n")
+    recent = lines[-limit:]
+
+    console.print(f"\n[bold]Ultimas {len(recent)} llamadas:[/bold]\n")
+    for line in recent:
+        entry = json.loads(line)
+        ts = entry.get("timestamp", "")[:19].replace("T", " ")
+        q = entry.get("question", "")[:60] + ("..." if len(entry.get("question", "")) > 60 else "")
+        cost = entry.get("costo_total_usd", entry.get("cost_total_usd", 0.0))
+        tokens = entry.get("tokens_totales", entry.get("total_tokens", 0))
+        modelo = entry.get("model", "desconocido")
+        grounding = "[green][Web][/green] " if entry.get("grounding_used") else ""
+        console.print(f"  [dim]{ts}[/dim]  {grounding}[cyan]{q}[/cyan]")
+        console.print(f"           [{modelo}] Tokens: {tokens:,} | Costo: [green]${cost:.8f} USD[/green]\n")
+
+
+def show_stats() -> None:
+    """Muestra el costo total acumulado y estadísticas."""
+    if not LOG_FILE.exists():
+        console.print("[yellow]No hay historial todavía.[/yellow]")
+        return
+
+    lines = LOG_FILE.read_text(encoding="utf-8").strip().split("\n")
+    total_calls = len(lines)
+    total_tokens = 0
+    total_cost = 0.0
+
+    for line in lines:
+        entry = json.loads(line)
+        total_tokens += entry.get("tokens_totales", entry.get("total_tokens", 0))
+        total_cost += entry.get("costo_total_usd", entry.get("cost_total_usd", 0.0))
+
+    table = Table(title="Resumen de uso acumulado", border_style="green")
+    table.add_column("Estadistica", style="bold")
+    table.add_column("Valor", justify="right")
+
+    table.add_row("Total de llamadas", str(total_calls))
+    table.add_row("Tokens totales usados", f"{total_tokens:,}")
+    table.add_row("Costo total acumulado", f"[bold green]${total_cost:.4f} USD[/bold green]")
+    table.add_row("Costo promedio/llamada", f"${total_cost/total_calls:.6f} USD")
+
+    console.print()
+    console.print(table)
+
