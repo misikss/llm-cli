@@ -3,12 +3,14 @@ display.py — Renderizado de consola con Rich y gestión de historial/estadíst
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from config import LOG_DIR, LOG_FILE, PRECIOS_MODELO, GEMINI_MODEL
+from config import ERROR_LOG_FILE, LOG_DIR, LOG_FILE, PRECIOS_MODELO, GEMINI_MODEL
+from errors import LLMCLIError
 from models import LLMResponse, CallMetrics
 
 console = Console(force_terminal=True, highlight=False)
@@ -19,6 +21,30 @@ def save_to_log(metrics: CallMetrics) -> None:
     LOG_DIR.mkdir(exist_ok=True)
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(metrics.model_dump_json() + "\n")
+
+
+def save_error_to_log(error: Exception) -> None:
+    """Persiste fallos de solicitudes sin secretos ni stack traces completos."""
+    LOG_DIR.mkdir(exist_ok=True)
+    if isinstance(error, LLMCLIError):
+        error_data = error.to_dict()
+    else:
+        error_data = {
+            "type": type(error).__name__,
+            "code": "unexpected_error",
+            "message": str(error),
+            "retryable": False,
+        }
+
+    payload = {
+        "event_type": "request_error",
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "trace_id": getattr(error, "trace_id", None),
+        "question": getattr(error, "question", None),
+        "error": error_data,
+    }
+    with ERROR_LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def display_response(validated: LLMResponse, metrics: CallMetrics) -> None:
@@ -50,6 +76,13 @@ def display_response(validated: LLMResponse, metrics: CallMetrics) -> None:
     if metrics.file_attached:
         table.add_row("Archivo adjunto", f"[cyan]{Path(metrics.file_attached).name}[/cyan]")
     table.add_row("Enrutado como (Auto-route)", f"[bold magenta]{metrics.routed_as}[/bold magenta]")
+    table.add_row("Fuente del routing", metrics.route_source)
+    table.add_row("Trace ID", metrics.trace_id)
+    table.add_row("Latencia total", f"{metrics.total_latency_ms:.2f} ms")
+    if metrics.fallbacks:
+        table.add_row("Fallbacks", str(len(metrics.fallbacks)))
+    if metrics.errors:
+        table.add_row("Errores registrados", str(len(metrics.errors)))
     if metrics.grounding_used:
         table.add_row("Modo Grounding / Tool", "[bold green]Activo (En tiempo real)[/bold green]")
 
@@ -115,19 +148,31 @@ def show_history(limit: int = 10) -> None:
         return
 
     lines = LOG_FILE.read_text(encoding="utf-8").strip().split("\n")
-    recent = lines[-limit:]
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    recent = entries[-limit:]
 
     console.print(f"\n[bold]Ultimas {len(recent)} llamadas:[/bold]\n")
-    for line in recent:
-        entry = json.loads(line)
+    for entry in recent:
         ts = entry.get("timestamp", "")[:19].replace("T", " ")
         q = entry.get("question", "")[:60] + ("..." if len(entry.get("question", "")) > 60 else "")
         cost = entry.get("costo_total_usd", entry.get("cost_total_usd", 0.0))
         tokens = entry.get("tokens_totales", entry.get("total_tokens", 0))
         modelo = entry.get("model", "desconocido")
         grounding = "[green][Web][/green] " if entry.get("grounding_used") else ""
+        trace_id = entry.get("trace_id", "")
+        latency = entry.get("total_latency_ms")
         console.print(f"  [dim]{ts}[/dim]  {grounding}[cyan]{q}[/cyan]")
-        console.print(f"           [{modelo}] Tokens: {tokens:,} | Costo: [green]${cost:.8f} USD[/green]\n")
+        details = f"[{modelo}] Tokens: {tokens:,} | Costo: [green]${cost:.8f} USD[/green]"
+        if latency is not None:
+            details += f" | Latencia: {latency:.2f} ms"
+        if trace_id:
+            details += f" | Trace: {trace_id}"
+        console.print(f"           {details}\n")
 
 
 def show_stats() -> None:
@@ -137,12 +182,18 @@ def show_stats() -> None:
         return
 
     lines = LOG_FILE.read_text(encoding="utf-8").strip().split("\n")
-    total_calls = len(lines)
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    entries = [entry for entry in entries if entry.get("event_type", "llm_call") == "llm_call"]
+    total_calls = len(entries)
     total_tokens = 0
     total_cost = 0.0
 
-    for line in lines:
-        entry = json.loads(line)
+    for entry in entries:
         total_tokens += entry.get("tokens_totales", entry.get("total_tokens", 0))
         total_cost += entry.get("costo_total_usd", entry.get("cost_total_usd", 0.0))
 
@@ -153,7 +204,8 @@ def show_stats() -> None:
     table.add_row("Total de llamadas", str(total_calls))
     table.add_row("Tokens totales usados", f"{total_tokens:,}")
     table.add_row("Costo total acumulado", f"[bold green]${total_cost:.4f} USD[/bold green]")
-    table.add_row("Costo promedio/llamada", f"${total_cost/total_calls:.6f} USD")
+    average_cost = total_cost / total_calls if total_calls else 0.0
+    table.add_row("Costo promedio/llamada", f"${average_cost:.6f} USD")
 
     console.print()
     console.print(table)

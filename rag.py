@@ -9,12 +9,16 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from collections.abc import Sequence
+import logging
 from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 from google import genai
 from google.genai import types as genai_types
 
 from config import GEMINI_MODEL, RERANK_MIN_SCORE, RERANK_TOP_N
+
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -151,8 +155,11 @@ def rewrite_query(
 
         if res.parsed:
             return res.parsed, t_in, t_out
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "query_rewrite_fallback error_type=%s",
+            type(exc).__name__,
+        )
 
     # Fallback si falla el llamado
     tokens = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 3]
@@ -281,8 +288,12 @@ def rerank_documents(
                     selected.append(documents[item.index])
                     seen_indexes.add(item.index)
             return selected[:top_n], t_in, t_out
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "llm_reranker_fallback error_type=%s candidates=%s",
+            type(exc).__name__,
+            len(documents),
+        )
 
     # Fallback si falla el reranker: retornar los primeros candidatos
     return documents[:top_n], 0, 0

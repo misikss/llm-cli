@@ -2,7 +2,8 @@
 models.py — Esquemas de validación con Pydantic para entradas, salidas y métricas.
 """
 
-from typing import Literal
+from typing import Any, Literal
+from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -64,6 +65,32 @@ class LLMResponse(BaseModel):
         return v[:5]
 
 
+class ErrorMetric(BaseModel):
+    """Error sanitizado asociado a una etapa de una solicitud."""
+
+    type: str
+    code: str
+    message: str
+    retryable: bool = False
+    stage: str | None = None
+    model: str | None = None
+    status_code: int | None = None
+
+
+class StageMetric(BaseModel):
+    """Latencia y resultado de una etapa del pipeline."""
+
+    name: str
+    status: Literal["ok", "fallback", "error"] = "ok"
+    started_at: str | None = None
+    latency_ms: float = 0.0
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    error: ErrorMetric | None = None
+
+
 class CallMetrics(BaseModel):
     """Métricas de uso y costo de una llamada a la API."""
     timestamp: str
@@ -97,4 +124,14 @@ class CallMetrics(BaseModel):
     costo_total_usd: float
 
     response: dict  # La respuesta validada como dict
+
+    # Observabilidad de la solicitud completa
+    event_type: Literal["llm_call"] = "llm_call"
+    trace_id: str = Field(default_factory=lambda: f"req_{uuid4().hex[:12]}")
+    request_started_at: str | None = None
+    total_latency_ms: float = 0.0
+    route_source: Literal["llm", "manual", "fallback"] = "llm"
+    stage_metrics: list[StageMetric] = Field(default_factory=list)
+    errors: list[ErrorMetric] = Field(default_factory=list)
+    fallbacks: list[dict[str, Any]] = Field(default_factory=list)
 

@@ -4,7 +4,8 @@
 
 ```mermaid
 flowchart TD
-    UserQuery["Pregunta del usuario"] --> WorkingMemory["Working Memory<br/>RAM"]
+    UserQuery["CLI o futura API<br/>Pregunta del usuario"] --> Service["AssistantService<br/>caso de uso"]
+    Service --> WorkingMemory["Working Memory<br/>RAM"]
     WorkingMemory --> Router["Semantic Router<br/>determine_route"]
     Router --> Decision{"Ruta"}
 
@@ -27,6 +28,8 @@ flowchart TD
     Final --> Answer
     Answer --> Update["Actualizar memoria"]
     Update --> Persist["ChromaDB + JSONL"]
+    Service --> Trace["RequestTrace<br/>trace_id + etapas + errores"]
+    Trace --> History["history.jsonl / errors.jsonl"]
 ```
 
 ## Decisiones importantes
@@ -35,6 +38,9 @@ flowchart TD
 - BM25, vector search y RRF usan IDs estables; el texto se recupera después para evitar colisiones entre documentos iguales.
 - El reranking se ejecuta solo sobre pocos candidatos y usa Gemini como LLM reranker. No se carga un cross-encoder local para mantener bajo el consumo de RAM.
 - Las consultas que no necesitan memoria no ejecutan el pipeline RAG.
+- `llm_cli.py` no contiene la lógica del caso de uso: solo convierte argumentos/input en `AskRequest` y presenta `AskResult`.
+- Los errores se clasifican como configuración, proveedor, cuota, modelo no disponible, retrieval, memoria o tool execution.
+- Cada solicitud produce un `trace_id` y registra latencia por etapa sin persistir secretos completos.
 
 ## Evaluación
 

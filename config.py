@@ -38,6 +38,7 @@ FALLBACK_MODELS = [
 # Rutas de persistencia
 LOG_DIR = Path("logs")
 LOG_FILE = LOG_DIR / "history.jsonl"
+ERROR_LOG_FILE = LOG_DIR / "errors.jsonl"
 
 # Parámetros del LLM Re-ranking
 RERANK_MIN_SCORE: float = 0.45

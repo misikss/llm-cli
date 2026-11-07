@@ -3,8 +3,12 @@ tools.py — Herramientas disponibles para Gemini (Clima en tiempo real y utilid
 """
 
 import json
+import logging
 import urllib.parse
 import urllib.request
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_weather(city: str) -> str:
@@ -54,6 +58,10 @@ def get_current_weather(city: str) -> str:
             f"- Humedad relativa: {humidity}%\n"
             f"- Velocidad del viento: {wind} km/h"
         )
-    except Exception as e:
-        return f"Error consultando el clima para {city}: {e}"
+    except Exception as exc:
+        logger.warning(
+            "weather_lookup_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return f"No se pudo consultar el clima para {city}. Intenta nuevamente."
 

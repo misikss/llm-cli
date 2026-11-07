@@ -4,6 +4,7 @@ client.py — Orquestación de llamadas a Google GenAI con Pydantic, Grounding y
 
 from datetime import datetime
 import mimetypes
+import logging
 from pathlib import Path
 
 from google import genai
@@ -18,6 +19,10 @@ from config import (
 )
 from models import LLMResponse, CallMetrics, RouteDecision
 from tools import get_current_weather
+from errors import ProviderError, classify_provider_error
+
+
+logger = logging.getLogger(__name__)
 
 
 def call_with_fallback(client: genai.Client, contents: list | str, config: genai_types.GenerateContentConfig):
@@ -32,7 +37,7 @@ def call_with_fallback(client: genai.Client, contents: list | str, config: genai
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else [GEMINI_API_KEY]
     candidates = [GEMINI_MODEL] + [m for m in FALLBACK_MODELS if m != GEMINI_MODEL]
 
-    last_error = None
+    last_error: ProviderError | None = None
 
     for model_name in candidates:
         for key_idx, api_key in enumerate(keys):
@@ -44,22 +49,28 @@ def call_with_fallback(client: genai.Client, contents: list | str, config: genai
                     config=config,
                 )
                 return response, model_name
-            except Exception as e:
-                err_msg = str(e)
-                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg or "404" in err_msg:
+            except Exception as exc:
+                provider_error = classify_provider_error(exc, model=model_name)
+                logger.warning(
+                    "provider_attempt_failed model=%s key_index=%s error_code=%s retryable=%s",
+                    model_name,
+                    key_idx + 1,
+                    provider_error.code,
+                    provider_error.retryable,
+                )
+                if provider_error.retryable:
                     from display import console
-                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    if provider_error.code == "quota_exceeded":
                         console.print(
                             f"[yellow][!] Cuota en '{model_name}' con Key {key_idx + 1}/{len(keys)}. Probando siguiente clave...[/yellow]"
                         )
-                    last_error = e
+                    last_error = provider_error
                     continue
-                else:
-                    raise e
+                raise provider_error from exc
 
-    raise last_error if last_error else RuntimeError("No se pudo obtener respuesta de ningún modelo ni API key.")
-
-    raise last_error if last_error else RuntimeError("No se pudo obtener respuesta de ningún modelo ni API key.")
+    raise last_error or ProviderError(
+        "No se pudo obtener respuesta de ningún modelo ni API key."
+    )
 
 
 def prepare_multimodal_content(prompt_text: str, file_path: str | Path | None = None) -> list:
@@ -152,8 +163,11 @@ def determine_route(
         res, _ = call_with_fallback(client, router_prompt, config)
         if res.parsed:
             return res.parsed
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "semantic_router_fallback error_type=%s",
+            type(exc).__name__,
+        )
 
     # Heurística de fallback en caso de error de red sin hardcodeo temático estricto
     q_low = question.lower()
@@ -176,6 +190,7 @@ def execute_llm_call(
     context_prefix: str = "",
     rag_tokens: dict | None = None,
     route_decision: RouteDecision | None = None,
+    client: genai.Client | None = None,
 ) -> tuple[LLMResponse, CallMetrics]:
     """
     Ejecuta la llamada a Gemini soportando:
@@ -186,7 +201,7 @@ def execute_llm_call(
       - Function calling para clima en tiempo real (--clima / -c)
       - Entradas multimodales (imágenes, audios, documentos)
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = client or genai.Client(api_key=GEMINI_API_KEY)
 
     routed_as = "general"
 

@@ -22,6 +22,9 @@ from config import GEMINI_API_KEY, GEMINI_MODEL
 from rag import BM25Index, RetrievalDocument
 
 
+logger = logging.getLogger(__name__)
+
+
 class MemoryState(BaseModel):
     """Estado compacto de la memoria de la sesión (Working Memory)."""
     active_subject: str = Field(
@@ -93,9 +96,9 @@ class EpisodicMemory:
             )
             self._bm25_index = None
             self._bm25_doc_count = -1
-        except Exception:
+        except Exception as exc:
             # Si falla la indexación en segundo plano, la conversación no se bloquea
-            pass
+            logger.warning("memory_store_failed error_type=%s", type(exc).__name__)
 
     def get_all_documents(self) -> list[RetrievalDocument]:
         """Obtiene documentos e IDs estables para indexar en BM25."""
@@ -108,14 +111,16 @@ class EpisodicMemory:
                 for memory_id, document in zip(ids, documents)
                 if document
             ]
-        except Exception:
+        except Exception as exc:
+            logger.warning("memory_read_failed error_type=%s", type(exc).__name__)
             return []
 
     def get_bm25_index(self) -> BM25Index:
         """Devuelve un índice BM25 cacheado e invalida el caché al crecer ChromaDB."""
         try:
             collection_count = self.collection.count()
-        except Exception:
+        except Exception as exc:
+            logger.warning("memory_count_failed error_type=%s", type(exc).__name__)
             collection_count = 0
 
         if self._bm25_index is None or collection_count != self._bm25_doc_count:
@@ -151,7 +156,8 @@ class EpisodicMemory:
                     if document
                 ]
             return []
-        except Exception:
+        except Exception as exc:
+            logger.warning("vector_retrieval_failed error_type=%s", type(exc).__name__)
             return []
 
     def retrieve_relevant_memories(
@@ -187,7 +193,8 @@ class EpisodicMemory:
                         relevant_docs.append(doc)
 
             return relevant_docs
-        except Exception:
+        except Exception as exc:
+            logger.warning("relevant_memory_retrieval_failed error_type=%s", type(exc).__name__)
             return []
 
 
@@ -303,8 +310,9 @@ class HybridMemory:
                     self.active_subject = st.active_subject
                     detected_subject = st.active_subject
                 self.key_facts = st.key_facts[:3]
-        except Exception:
+        except Exception as exc:
             # Fallback simple
+            logger.warning("working_memory_update_fallback error_type=%s", type(exc).__name__)
             words = [w for w in user_message.split() if len(w) > 3 and w.istitle()]
             if words:
                 self.active_subject = " ".join(words[:2])

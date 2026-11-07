@@ -126,6 +126,9 @@ llm-cli/
 ├── rag.py              ← Advanced RAG (rewrite_query, BM25, RRF y LLM Reranking)
 ├── memory.py           ← Memoria híbrida (RAM Working Memory + Episodic Memory en ChromaDB)
 ├── client.py           ← Lógica con Google GenAI SDK (Semantic Router Few-Shot, Grounding, Failover)
+├── service.py          ← Caso de uso AssistantService, independiente de la CLI
+├── errors.py           ← Errores tipados, clasificación de cuota y fallos temporales
+├── observability.py    ← Trace por solicitud, etapas, latencia y fallbacks
 ├── display.py          ← Renderizado de UI en consola con Rich y persistencia en JSONL
 ├── llm_cli.py          ← Punto de entrada principal y bucle interactivo optimizado
 ├── benchmarks/         ← Dataset y runner para evaluar retrieval
@@ -135,6 +138,10 @@ llm-cli/
 ├── requirements.txt    ← Dependencias necesarias
 └── chroma_db/          ← Base de datos vectorial persistente con embeddings
 ```
+
+La CLI solo gestiona argumentos, input y presentación. `AssistantService` coordina el routing, el retrieval, la generación y la actualización de memoria, por lo que la misma lógica puede reutilizarse más adelante desde una API.
+
+Cada llamada exitosa registra un `trace_id`, latencia total, etapas (`route`, `retrieval`, `generation`, `memory_update`), tokens, fallbacks y errores sanitizados en `logs/history.jsonl`. Los fallos de solicitudes se registran en `logs/errors.jsonl`.
 
 ---
 
