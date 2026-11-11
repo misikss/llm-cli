@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from errors import QuotaExceededError, classify_provider_error
+from memory import EpisodicMemory
 from models import CallMetrics, LLMResponse, RouteDecision
 from service import AskRequest, AssistantService
 
@@ -38,6 +39,36 @@ def fake_metrics() -> CallMetrics:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_request_context_can_override_service_defaults(self) -> None:
+        service = AssistantService(
+            client=object(),
+            memory=FakeMemory(),
+            user_id="user-default",
+            session_id="session-default",
+            conversation_id="conversation-default",
+        )
+
+        self.assertEqual(
+            service._resolve_context(AskRequest(
+                question="hello",
+                user_id="user-2",
+                session_id="session-2",
+                conversation_id="conversation-2",
+            )),
+            ("user-2", "session-2", "conversation-2"),
+        )
+
+    def test_episodic_scope_does_not_filter_by_session(self) -> None:
+        memory = EpisodicMemory.__new__(EpisodicMemory)
+        memory.user_id = "user-1"
+        memory.session_id = "session-2"
+        memory.conversation_id = "conversation-1"
+
+        self.assertEqual(
+            memory._scope_where(),
+            {"$and": [{"user_id": "user-1"}, {"conversation_id": "conversation-1"}]},
+        )
+
     def test_service_orchestrates_request_without_cli(self) -> None:
         memory = FakeMemory()
         response = LLMResponse(
@@ -55,13 +86,22 @@ class ServiceTests(unittest.TestCase):
             "service.execute_llm_call",
             return_value=(response, fake_metrics()),
         ):
-            result = AssistantService(client=object(), memory=memory).ask(
+            result = AssistantService(
+                client=object(),
+                memory=memory,
+                user_id="user-1",
+                session_id="session-1",
+                conversation_id="conversation-1",
+            ).ask(
                 AskRequest(question="hello")
             )
 
         self.assertEqual(result.response.answer, "ok")
         self.assertTrue(memory.updated)
         self.assertTrue(result.metrics.trace_id.startswith("req_"))
+        self.assertEqual(result.metrics.user_id, "user-1")
+        self.assertEqual(result.metrics.session_id, "session-1")
+        self.assertEqual(result.metrics.conversation_id, "conversation-1")
         self.assertEqual(
             [stage.name for stage in result.metrics.stage_metrics],
             ["route", "working_memory", "generation", "memory_update"],

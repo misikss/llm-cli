@@ -143,6 +143,26 @@ La CLI solo gestiona argumentos, input y presentación. `AssistantService` coord
 
 Cada llamada exitosa registra un `trace_id`, latencia total, etapas (`route`, `query_rewrite`, `retrieval`, `generation`, `memory_update`), tokens, fallbacks y errores sanitizados en `logs/history.jsonl`. Los fallos de solicitudes se registran en `logs/errors.jsonl`.
 
+### Contexto aislado por usuario y conversación
+
+Cada solicitud admite tres identificadores:
+
+- `user_id`: propietario del contexto.
+- `conversation_id`: chat lógico cuyos recuerdos se pueden reanudar entre ejecuciones.
+- `session_id`: ejecución concreta del proceso; sirve para trazabilidad y separa la Working Memory en RAM.
+
+La memoria episódica de ChromaDB se filtra por `user_id + conversation_id`, mientras que la Working Memory se mantiene separada por los tres valores. Así, una nueva sesión puede continuar la misma conversación sin mezclarla con otro usuario o chat. El CLI usa `local-user` y `default-conversation` por defecto, y genera un `session_id` nuevo por proceso.
+
+```bash
+# Reanudar una conversación concreta
+python llm_cli.py --user-id victor --conversation-id portfolio-ai -q "¿Qué decidimos sobre el reranker?"
+
+# Forzar una sesión identificable para logs y debugging
+python llm_cli.py --user-id victor --conversation-id portfolio-ai --session-id demo-01 -q "Resume el contexto"
+```
+
+Los recuerdos creados antes de esta funcionalidad se migran una sola vez de forma idempotente al scope local por defecto (`local-user` / `default-conversation`).
+
 ---
 
 ## 🚀 Instalación y Uso

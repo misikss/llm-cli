@@ -134,6 +134,9 @@ class CallMetrics(BaseModel):
 
     # Observabilidad de la solicitud completa
     event_type: Literal["llm_call"] = "llm_call"
+    user_id: str = "local-user"
+    session_id: str = "default-session"
+    conversation_id: str = "default-conversation"
     trace_id: str = Field(default_factory=lambda: f"req_{uuid4().hex[:12]}")
     request_started_at: str | None = None
     total_latency_ms: float = 0.0

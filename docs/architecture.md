@@ -4,7 +4,8 @@
 
 ```mermaid
 flowchart TD
-    UserQuery["CLI o futura API<br/>Pregunta del usuario"] --> Service["AssistantService<br/>caso de uso"]
+    UserQuery["CLI o futura API<br/>Pregunta + IDs de contexto"] --> Context["Context scope<br/>user_id · session_id · conversation_id"]
+    Context --> Service["AssistantService<br/>caso de uso"]
     Service --> WorkingMemory["Working Memory<br/>RAM"]
     WorkingMemory --> Router["Semantic Router<br/>determine_route"]
     Router --> Decision{"Ruta"}
@@ -42,6 +43,10 @@ flowchart TD
 - Los errores se clasifican como configuración, proveedor, cuota, modelo no disponible, retrieval, memoria o tool execution.
 - Cada solicitud produce un `trace_id` y registra latencia por etapa sin persistir secretos completos.
 - La medición de tokens cubre router, query rewriting, reranker, generación y memory update; embeddings registran cantidad de llamadas y tokens si el SDK los expone.
+- `user_id`, `conversation_id` y `session_id` viajan desde `AskRequest` hasta métricas, errores y memoria persistente.
+- ChromaDB filtra por `user_id + conversation_id`; `session_id` no participa en el filtro episódico para permitir reanudar el mismo chat en otra ejecución.
+- La Working Memory se guarda en un registro del servicio indexado por los tres IDs, evitando que dos chats activos compartan sujeto o hechos recientes.
+- Los documentos legacy sin IDs reciben el scope local por defecto mediante una migración idempotente al iniciar la memoria.
 
 ## Evaluación
 

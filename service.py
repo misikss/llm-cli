@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from uuid import uuid4
 
 from google import genai
 
@@ -25,6 +26,9 @@ class AskRequest:
     file_path: str | None = None
     use_grounding: bool = False
     use_weather: bool = False
+    user_id: str | None = None
+    session_id: str | None = None
+    conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,25 +47,82 @@ class AssistantService:
         client: genai.Client | None = None,
         memory: HybridMemory | None = None,
         db_path: str = "chroma_db",
+        user_id: str = "local-user",
+        session_id: str | None = None,
+        conversation_id: str = "default-conversation",
     ) -> None:
         if client is None and not GEMINI_API_KEY:
             raise ConfigurationError(
                 "GEMINI_API_KEY no está configurada. Configúrala en el archivo .env."
             )
         self.client = client or genai.Client(api_key=GEMINI_API_KEY)
-        self.memory = memory or HybridMemory(db_path=db_path)
+        self.db_path = db_path
+        self.user_id = user_id
+        self.session_id = session_id or f"sess_{uuid4().hex[:12]}"
+        self.conversation_id = conversation_id
+        self._memory_registry: dict[tuple[str, str, str], HybridMemory] = {}
+        self.memory = memory or self._create_memory(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            conversation_id=self.conversation_id,
+        )
+        self._memory_registry[self._memory_key(
+            self.user_id,
+            self.session_id,
+            self.conversation_id,
+        )] = self.memory
+
+    @staticmethod
+    def _memory_key(user_id: str, session_id: str, conversation_id: str) -> tuple[str, str, str]:
+        return user_id, session_id, conversation_id
+
+    def _create_memory(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        conversation_id: str,
+    ) -> HybridMemory:
+        return HybridMemory(
+            db_path=self.db_path,
+            user_id=user_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
+
+    def _resolve_context(self, request: AskRequest) -> tuple[str, str, str]:
+        return (
+            request.user_id or self.user_id,
+            request.session_id or self.session_id,
+            request.conversation_id or self.conversation_id,
+        )
+
+    def _memory_for(self, context: tuple[str, str, str]) -> HybridMemory:
+        if context not in self._memory_registry:
+            self._memory_registry[context] = self._create_memory(
+                user_id=context[0],
+                session_id=context[1],
+                conversation_id=context[2],
+            )
+        return self._memory_registry[context]
 
     def ask(self, request: AskRequest) -> AskResult:
         question = request.question.strip()
         if not question:
             raise InvalidRequestError("La pregunta no puede estar vacía.")
 
-        trace = RequestTrace()
+        user_id, session_id, conversation_id = self._resolve_context(request)
+        memory = self._memory_for((user_id, session_id, conversation_id))
+        trace = RequestTrace(
+            user_id=user_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
         route_source = "manual" if request.use_grounding or request.use_weather else "llm"
 
         try:
-            active_subject = self.memory.active_subject
-            recent_context = "; ".join(self.memory.key_facts)
+            active_subject = memory.active_subject
+            recent_context = "; ".join(memory.key_facts)
             route_usage: dict = {}
 
             with trace.stage("route", source=route_source) as event:
@@ -127,7 +188,7 @@ class AssistantService:
                     event["model"] = rewrite_usage.get("model")
 
                 with trace.stage("retrieval") as event:
-                    context_prefix, t_rr_in, t_rr_out = self.memory.get_context_prompt(
+                    context_prefix, t_rr_in, t_rr_out = memory.get_context_prompt(
                         self.client,
                         query=rewritten.rewritten_query,
                         keywords=rewritten.search_keywords,
@@ -146,7 +207,7 @@ class AssistantService:
                     })
             else:
                 with trace.stage("working_memory") as event:
-                    context_prefix = self.memory.get_working_memory_context()
+                    context_prefix = memory.get_working_memory_context()
                     event["metadata"]["has_context"] = bool(context_prefix)
 
             with trace.stage("generation") as event:
@@ -177,7 +238,7 @@ class AssistantService:
                     if route_decision.is_ephemeral
                     else validated.category
                 )
-                self.memory.update(
+                memory.update(
                     self.client,
                     question,
                     validated.answer,
@@ -249,5 +310,8 @@ class AssistantService:
                 "No se pudo completar la solicitud. Consulta el trace_id para revisar el error.",
                 trace_id=trace.trace_id,
                 question=question,
+                user_id=user_id,
+                session_id=session_id,
+                conversation_id=conversation_id,
                 cause=exc,
             ) from exc

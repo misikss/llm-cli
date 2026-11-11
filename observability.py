@@ -54,8 +54,17 @@ def capture_usage(
 class RequestTrace:
     """Acumula etapas, errores y fallbacks de una solicitud completa."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        user_id: str = "local-user",
+        session_id: str = "default-session",
+        conversation_id: str = "default-conversation",
+    ) -> None:
         self.trace_id = f"req_{uuid.uuid4().hex[:12]}"
+        self.user_id = user_id
+        self.session_id = session_id
+        self.conversation_id = conversation_id
         self.started_at = utc_now_iso()
         self._started = time.perf_counter()
         self.stages: list[dict[str, Any]] = []
@@ -101,6 +110,9 @@ class RequestTrace:
         route_source: str,
     ) -> CallMetrics:
         metrics.trace_id = self.trace_id
+        metrics.user_id = self.user_id
+        metrics.session_id = self.session_id
+        metrics.conversation_id = self.conversation_id
         metrics.request_started_at = self.started_at
         metrics.total_latency_ms = round((time.perf_counter() - self._started) * 1000, 2)
         metrics.route_source = route_source

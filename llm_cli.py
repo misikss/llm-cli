@@ -69,6 +69,21 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=10, help="Número de entradas a mostrar en el historial (default: 10)")
     parser.add_argument("--stats", action="store_true", help="Muestra el costo total acumulado")
     parser.add_argument("--modelos", action="store_true", help="Muestra la tabla de precios por modelo")
+    parser.add_argument(
+        "--user-id",
+        default="local-user",
+        help="Identificador del usuario propietario del contexto (default: local-user)",
+    )
+    parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Identificador de ejecución; por defecto se genera uno por proceso",
+    )
+    parser.add_argument(
+        "--conversation-id",
+        default="default-conversation",
+        help="Identificador del chat/conversación persistente",
+    )
 
 
 def persist_and_display(result) -> None:
@@ -106,7 +121,11 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        service = AssistantService()
+        service = AssistantService(
+            user_id=args.user_id,
+            session_id=args.session_id,
+            conversation_id=args.conversation_id,
+        )
     except LLMCLIError as exc:
         save_error_to_log(exc)
         console.print(f"[red]{exc.message}[/red]")

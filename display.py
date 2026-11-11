@@ -41,6 +41,9 @@ def save_error_to_log(error: Exception) -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "trace_id": getattr(error, "trace_id", None),
         "question": getattr(error, "question", None),
+        "user_id": getattr(error, "user_id", None),
+        "session_id": getattr(error, "session_id", None),
+        "conversation_id": getattr(error, "conversation_id", None),
         "error": error_data,
     }
     with ERROR_LOG_FILE.open("a", encoding="utf-8") as f:
@@ -78,6 +81,9 @@ def display_response(validated: LLMResponse, metrics: CallMetrics) -> None:
     table.add_row("Enrutado como (Auto-route)", f"[bold magenta]{metrics.routed_as}[/bold magenta]")
     table.add_row("Fuente del routing", metrics.route_source)
     table.add_row("Trace ID", metrics.trace_id)
+    table.add_row("User ID", metrics.user_id)
+    table.add_row("Session ID", metrics.session_id)
+    table.add_row("Conversation ID", metrics.conversation_id)
     table.add_row("Latencia total", f"{metrics.total_latency_ms:.2f} ms")
     if metrics.fallbacks:
         table.add_row("Fallbacks", str(len(metrics.fallbacks)))

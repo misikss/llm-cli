@@ -85,12 +85,28 @@ class RequestExecutionError(LLMCLIError):
         *,
         trace_id: str,
         question: str,
+        user_id: str = "local-user",
+        session_id: str = "default-session",
+        conversation_id: str = "default-conversation",
         cause: Exception | None = None,
     ) -> None:
         super().__init__(message)
         self.trace_id = trace_id
         self.question = question
+        self.user_id = user_id
+        self.session_id = session_id
+        self.conversation_id = conversation_id
         self.cause = cause
+
+    def to_dict(self) -> dict[str, Any]:
+        data = super().to_dict()
+        data.update({
+            "trace_id": self.trace_id,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
+        })
+        return data
 
 
 class RetrievalError(LLMCLIError):

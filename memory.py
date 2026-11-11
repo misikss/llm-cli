@@ -44,7 +44,18 @@ class EpisodicMemory:
     Guarda recuerdos importantes y recupera solo lo relevante mediante similitud semántica.
     """
 
-    def __init__(self, db_path: str = "chroma_db", collection_name: str = "episodic_memory"):
+    def __init__(
+        self,
+        db_path: str = "chroma_db",
+        collection_name: str = "episodic_memory",
+        *,
+        user_id: str = "local-user",
+        session_id: str = "default-session",
+        conversation_id: str = "default-conversation",
+    ):
+        self.user_id = user_id
+        self.session_id = session_id
+        self.conversation_id = conversation_id
         self.client = chromadb.PersistentClient(
             path=db_path,
             settings=Settings(anonymized_telemetry=False),
@@ -56,6 +67,56 @@ class EpisodicMemory:
         self.embedding_model = "gemini-embedding-2"
         self._bm25_index: BM25Index | None = None
         self._bm25_doc_count = -1
+        self._migrate_legacy_metadata()
+
+    def _scope_where(self) -> dict:
+        """Limita la recuperación al usuario y conversación actuales.
+
+        El session_id se registra como trazabilidad, pero no filtra memoria
+        episódica: una conversación puede reanudarse en otra sesión del proceso.
+        """
+        return {
+            "$and": [
+                {"user_id": self.user_id},
+                {"conversation_id": self.conversation_id},
+            ]
+        }
+
+    def _scoped_count(self) -> int:
+        """Cuenta solo recuerdos visibles para este usuario y conversación."""
+        data = self.collection.get(where=self._scope_where())
+        return len(data.get("ids", []) or [])
+
+    def _migrate_legacy_metadata(self) -> None:
+        """Añade scope a recuerdos creados antes de introducir IDs.
+
+        Como el proyecto era single-user antes de esta migración, los
+        documentos antiguos se asignan al usuario/conversación locales por
+        defecto. La operación es idempotente.
+        """
+        try:
+            data = self.collection.get()
+            ids = data.get("ids", []) or []
+            metadatas = data.get("metadatas", []) or []
+            update_ids: list[str] = []
+            update_metadatas: list[dict] = []
+
+            for memory_id, metadata in zip(ids, metadatas):
+                current = dict(metadata or {})
+                if "user_id" in current and "conversation_id" in current:
+                    continue
+                current.setdefault("user_id", "local-user")
+                current.setdefault("session_id", "legacy-session")
+                current.setdefault("conversation_id", "default-conversation")
+                current["legacy_migrated"] = True
+                update_ids.append(str(memory_id))
+                update_metadatas.append(current)
+
+            if update_ids:
+                self.collection.update(ids=update_ids, metadatas=update_metadatas)
+                logger.info("legacy_memory_metadata_migrated count=%s", len(update_ids))
+        except Exception as exc:
+            logger.warning("legacy_memory_migration_failed error_type=%s", type(exc).__name__)
 
     def _get_embedding(
         self,
@@ -106,7 +167,10 @@ class EpisodicMemory:
                     "subject": subject or "general",
                     "category": category,
                     "date": date_str,
-                    "timestamp": str(int(time.time()))
+                    "timestamp": str(int(time.time())),
+                    "user_id": self.user_id,
+                    "session_id": self.session_id,
+                    "conversation_id": self.conversation_id,
                 }]
             )
             self._bm25_index = None
@@ -118,7 +182,7 @@ class EpisodicMemory:
     def get_all_documents(self) -> list[RetrievalDocument]:
         """Obtiene documentos e IDs estables para indexar en BM25."""
         try:
-            data = self.collection.get()
+            data = self.collection.get(where=self._scope_where())
             ids = data.get("ids", []) or []
             documents = data.get("documents", []) or []
             return [
@@ -133,7 +197,7 @@ class EpisodicMemory:
     def get_bm25_index(self) -> BM25Index:
         """Devuelve un índice BM25 cacheado e invalida el caché al crecer ChromaDB."""
         try:
-            collection_count = self.collection.count()
+            collection_count = self._scoped_count()
         except Exception as exc:
             logger.warning("memory_count_failed error_type=%s", type(exc).__name__)
             collection_count = 0
@@ -154,14 +218,15 @@ class EpisodicMemory:
     ) -> list[str]:
         """Recupera candidatos vectoriales para alimentar la búsqueda híbrida."""
         try:
-            count = self.collection.count()
+            count = self._scoped_count()
             if count == 0:
                 return []
 
             query_vector = self._get_embedding(genai_client, query, usage_sink=usage_sink)
             results = self.collection.query(
                 query_embeddings=[query_vector],
-                n_results=min(n_results, count)
+                n_results=min(n_results, count),
+                where=self._scope_where(),
             )
             if results and results.get("documents") and results.get("ids"):
                 documents = results["documents"][0]
@@ -189,14 +254,15 @@ class EpisodicMemory:
         Si la distancia es alta (tema diferente), devuelve lista vacía para no gastar tokens.
         """
         try:
-            count = self.collection.count()
+            count = self._scoped_count()
             if count == 0:
                 return []
 
             query_vector = self._get_embedding(genai_client, query, usage_sink=usage_sink)
             results = self.collection.query(
                 query_embeddings=[query_vector],
-                n_results=min(n_results, count)
+                n_results=min(n_results, count),
+                where=self._scope_where(),
             )
 
             relevant_docs = []
@@ -222,10 +288,25 @@ class HybridMemory:
       - Episodic Memory: Para recordar conversaciones pasadas en ChromaDB si el tema vuelve a surgir.
     """
 
-    def __init__(self, db_path: str = "chroma_db"):
+    def __init__(
+        self,
+        db_path: str = "chroma_db",
+        *,
+        user_id: str = "local-user",
+        session_id: str = "default-session",
+        conversation_id: str = "default-conversation",
+    ):
+        self.user_id = user_id
+        self.session_id = session_id
+        self.conversation_id = conversation_id
         self.active_subject: str = ""
         self.key_facts: list[str] = []
-        self.episodic = EpisodicMemory(db_path=db_path)
+        self.episodic = EpisodicMemory(
+            db_path=db_path,
+            user_id=user_id,
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
 
     def get_working_memory_context(self) -> str:
         """Devuelve el contexto inmediato en RAM (sujeto y hechos activos) a costo 0 de tokens."""
