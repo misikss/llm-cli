@@ -127,6 +127,8 @@ llm-cli/
 ├── memory.py           ← Memoria híbrida (RAM Working Memory + Episodic Memory en ChromaDB)
 ├── client.py           ← Lógica con Google GenAI SDK (Semantic Router Few-Shot, Grounding, Failover)
 ├── service.py          ← Caso de uso AssistantService, independiente de la CLI
+├── dashboard.py        ← API FastAPI para probar el pipeline desde el navegador
+├── dashboard/          ← UI local de observabilidad (input, output, trace y raw JSON)
 ├── errors.py           ← Errores tipados, clasificación de cuota y fallos temporales
 ├── observability.py    ← Trace por solicitud, etapas, latencia y fallbacks
 ├── display.py          ← Renderizado de UI en consola con Rich y persistencia en JSONL
@@ -193,6 +195,32 @@ python llm_cli.py --history
 python llm_cli.py --stats
 python llm_cli.py --modelos
 ```
+
+### Dashboard web local
+
+El dashboard mantiene `AssistantService` como única fuente de verdad. La UI solo captura la consulta, los IDs de contexto y el archivo; la API devuelve la respuesta estructurada junto con routing, trace, etapas, tokens, costes, latencia y el payload JSON completo.
+
+```bash
+pip install -r requirements.txt
+python dashboard.py
+```
+
+Abre [http://127.0.0.1:8000](http://127.0.0.1:8000). Puedes adjuntar PDF, XLSX, XLS, CSV, TSV, imágenes, audio, TXT o DOCX. El archivo se guarda temporalmente durante la solicitud, se envía al mismo flujo multimodal de Gemini y se elimina al terminar; el dashboard solo muestra sus metadatos.
+
+Arquitectura del dashboard:
+
+```mermaid
+flowchart LR
+    Browser["Dashboard<br/>HTML + CSS + JS"] --> API["FastAPI<br/>/api/ask"]
+    API --> Service["AssistantService"]
+    Service --> Pipeline["Router · RAG · Gemini<br/>Memory + ChromaDB"]
+    Service --> JSON["AskResult<br/>response + metrics + trace"]
+    JSON --> API
+    API --> Browser
+    API --> Logs["history.jsonl<br/>errors.jsonl"]
+```
+
+El `session_id`, `user_id` y `conversation_id` se editan desde el panel para poder probar conversaciones aisladas. El navegador conserva el usuario y conversación en `localStorage`, y la sesión en `sessionStorage`.
 
 ---
 

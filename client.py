@@ -101,6 +101,16 @@ def prepare_multimodal_content(prompt_text: str, file_path: str | Path | None = 
             mime_type = "audio/ogg"
         elif ext == ".pdf":
             mime_type = "application/pdf"
+        elif ext == ".xlsx":
+            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        elif ext == ".xls":
+            mime_type = "application/vnd.ms-excel"
+        elif ext == ".csv":
+            mime_type = "text/csv"
+        elif ext == ".tsv":
+            mime_type = "text/tab-separated-values"
+        elif ext == ".docx":
+            mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         else:
             mime_type = "application/octet-stream"
 

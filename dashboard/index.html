@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Control room local para probar y observar el pipeline multimodal de LLM CLI." />
+    <title>LLM CLI / Control Room</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="LLM CLI Control Room">
+          <span class="brand-mark">◒</span>
+          <span>LLM CLI <b>/</b> CONTROL ROOM</span>
+        </a>
+        <div class="topbar-meta">
+          <span class="status-dot" id="health-dot"></span>
+          <span id="health-label">CHECKING LOCAL API</span>
+          <span class="topbar-divider"></span>
+          <span class="mono">127.0.0.1:8000</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="intro-row">
+          <div>
+            <p class="kicker">MULTIMODAL PIPELINE / OBSERVABILITY LAB</p>
+            <h1>See the pipeline,<br /><em>not just the answer.</em></h1>
+          </div>
+          <div class="intro-copy">
+            <p>Escribe una consulta, adjunta un archivo y sigue cada decisión: routing, retrieval, generación, memoria, tokens, coste y latencia.</p>
+            <button class="quiet-button" id="new-conversation" type="button">+ Nueva conversación</button>
+          </div>
+        </section>
+
+        <div class="workspace-grid">
+          <aside class="input-panel panel">
+            <div class="panel-heading">
+              <div>
+                <p class="section-index">01 / INPUT</p>
+                <h2>Send a run</h2>
+              </div>
+              <span class="live-chip">LIVE</span>
+            </div>
+
+            <form id="ask-form">
+              <label class="field-label" for="question">Pregunta</label>
+              <textarea id="question" name="question" rows="7" placeholder="Ej. analiza esta hoja y dime qué patrones ves..." required></textarea>
+
+              <div class="field-group">
+                <div class="field-heading">
+                  <label class="field-label" for="file">Archivo adjunto</label>
+                  <span class="field-hint">máx. 25 MB</span>
+                </div>
+                <label class="dropzone" id="dropzone" for="file">
+                  <input id="file" name="file" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.mp3,.wav,.ogg,.xlsx,.xls,.csv,.tsv,.txt,.docx" />
+                  <span class="drop-icon">↥</span>
+                  <span class="drop-title">Arrastra o selecciona un archivo</span>
+                  <span class="drop-subtitle">PDF · XLSX · CSV · imágenes · audio · DOCX</span>
+                </label>
+                <div class="file-preview" id="file-preview" hidden></div>
+              </div>
+
+              <div class="field-group scope-group">
+                <div class="field-heading">
+                  <label class="field-label">Context scope</label>
+                  <span class="field-hint">aislamiento</span>
+                </div>
+                <label class="input-with-prefix">
+                  <span>USR</span>
+                  <input id="user-id" name="user_id" type="text" autocomplete="off" />
+                </label>
+                <label class="input-with-prefix">
+                  <span>CONV</span>
+                  <input id="conversation-id" name="conversation_id" type="text" autocomplete="off" />
+                </label>
+                <label class="input-with-prefix">
+                  <span>SESS</span>
+                  <input id="session-id" name="session_id" type="text" autocomplete="off" />
+                </label>
+              </div>
+
+              <div class="mode-row">
+                <label class="toggle-option">
+                  <input id="use-grounding" name="use_grounding" type="checkbox" />
+                  <span class="toggle-box"></span>
+                  <span>Web grounding</span>
+                </label>
+                <label class="toggle-option">
+                  <input id="use-weather" name="use_weather" type="checkbox" />
+                  <span class="toggle-box"></span>
+                  <span>Weather tool</span>
+                </label>
+              </div>
+
+              <button class="submit-button" id="submit-button" type="submit">
+                <span id="submit-label">Run pipeline</span>
+                <span class="submit-arrow">↗</span>
+              </button>
+              <p class="form-note">La UI no guarda el archivo: lo envía temporalmente al servicio y lo elimina al terminar.</p>
+            </form>
+          </aside>
+
+          <section class="output-column">
+            <div class="telemetry-grid">
+              <article class="metric-card">
+                <span class="metric-label">ROUTE</span>
+                <strong id="metric-route">—</strong>
+                <small id="metric-route-reason">waiting for run</small>
+              </article>
+              <article class="metric-card accent-card">
+                <span class="metric-label">TOTAL TOKENS</span>
+                <strong id="metric-tokens">—</strong>
+                <small id="metric-token-scope">generation only</small>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">LATENCY</span>
+                <strong id="metric-latency">—</strong>
+                <small>full request</small>
+              </article>
+              <article class="metric-card">
+                <span class="metric-label">COST</span>
+                <strong id="metric-cost">—</strong>
+                <small id="metric-model">waiting for model</small>
+              </article>
+            </div>
+
+            <section class="panel response-panel" aria-live="polite">
+              <div class="panel-heading response-heading">
+                <div>
+                  <p class="section-index">02 / OUTPUT</p>
+                  <h2>Assistant response</h2>
+                </div>
+                <span class="trace-pill" id="trace-pill">NO TRACE</span>
+              </div>
+              <div class="empty-state" id="empty-state">
+                <div class="empty-orbit"><span></span><span></span><span></span></div>
+                <p>El resultado de tu próxima ejecución aparecerá aquí.</p>
+              </div>
+              <div id="response-content" hidden>
+                <div class="response-meta" id="response-meta"></div>
+                <div class="answer-block">
+                  <p class="answer-label">ANSWER</p>
+                  <div class="answer-text" id="answer-text"></div>
+                </div>
+                <div class="detail-grid">
+                  <div>
+                    <p class="detail-label">KEY POINTS</p>
+                    <ul class="key-points" id="key-points"></ul>
+                  </div>
+                  <div>
+                    <p class="detail-label">SOURCES</p>
+                    <ul class="source-list" id="sources"></ul>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel pipeline-panel">
+              <div class="panel-heading compact-heading">
+                <div>
+                  <p class="section-index">03 / TRACE</p>
+                  <h2>Pipeline stages</h2>
+                </div>
+                <span class="field-hint">stage-level telemetry</span>
+              </div>
+              <div class="stage-table-wrap">
+                <table class="stage-table">
+                  <thead>
+                    <tr><th>Stage</th><th>Status</th><th>Latency</th><th>Tokens in/out</th><th>Metadata</th></tr>
+                  </thead>
+                  <tbody id="stage-body">
+                    <tr class="table-empty"><td colspan="5">No stages recorded yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <div class="lower-grid">
+              <section class="panel raw-panel">
+                <div class="panel-heading compact-heading">
+                  <div>
+                    <p class="section-index">04 / PAYLOAD</p>
+                    <h2>Raw data</h2>
+                  </div>
+                </div>
+                <details open>
+                  <summary>Request + response JSON</summary>
+                  <pre id="raw-json">Waiting for a run...</pre>
+                </details>
+              </section>
+
+              <section class="panel history-panel">
+                <div class="panel-heading compact-heading">
+                  <div>
+                    <p class="section-index">05 / HISTORY</p>
+                    <h2>Recent runs</h2>
+                  </div>
+                  <button class="icon-button" id="refresh-history" type="button" aria-label="Actualizar historial">↻</button>
+                </div>
+                <div class="history-list" id="history-list">
+                  <p class="table-empty">No runs in this conversation yet.</p>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <span>LLM CLI / LOCAL OBSERVABILITY SURFACE</span>
+        <span class="mono">AssistantService → Gemini → ChromaDB</span>
+      </footer>
+    </div>
+  </body>
+</html>

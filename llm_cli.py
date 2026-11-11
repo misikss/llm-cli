@@ -55,7 +55,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "-f", "--file", type=str, default=None,
-        help="Ruta a una imagen, audio o documento (JPG, PNG, MP3, WAV, PDF)",
+        help="Ruta a imagen, audio o documento (JPG, PNG, MP3, WAV, PDF, XLSX, CSV)",
     )
     parser.add_argument(
         "-g", "--grounding", action="store_true",

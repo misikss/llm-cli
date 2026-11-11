@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart TD
-    UserQuery["CLI o futura API<br/>Pregunta + IDs de contexto"] --> Context["Context scope<br/>user_id · session_id · conversation_id"]
+    UserQuery["CLI / Dashboard / futura API<br/>Pregunta + archivo"] --> Context["Context scope<br/>user_id · session_id · conversation_id"]
     Context --> Service["AssistantService<br/>caso de uso"]
     Service --> WorkingMemory["Working Memory<br/>RAM"]
     WorkingMemory --> Router["Semantic Router<br/>determine_route"]
@@ -31,6 +31,8 @@ flowchart TD
     Update --> Persist["ChromaDB + JSONL"]
     Service --> Trace["RequestTrace<br/>trace_id + etapas + errores"]
     Trace --> History["history.jsonl / errors.jsonl"]
+
+    Dashboard["Dashboard local<br/>FastAPI + HTML/CSS/JS"] --> Context
 ```
 
 ## Decisiones importantes
