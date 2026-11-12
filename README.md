@@ -28,9 +28,9 @@ flowchart TD
 
 La decisión queda visible en `document_mode` y `document_reason`. La primera
 consulta conserva el análisis directo mientras la indexación se encola en
-segundo plano. Cuando el índice está listo, los documentos mayores de 2 MB o
-consultados tres veces por el mismo usuario se recuperan desde `document_chunks`
-mediante Hybrid Search. Imagen y audio permanecen en el camino multimodal.
+segundo plano. En cuanto el índice está listo, las consultas posteriores del
+mismo archivo se recuperan desde `document_chunks` mediante Hybrid Search.
+Imagen y audio permanecen en el camino multimodal.
 
 Las decisiones completas están documentadas en
 [`docs/architecture.md`](docs/architecture.md) y

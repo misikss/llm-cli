@@ -181,6 +181,7 @@ class AssistantService:
                         })
                         event["metadata"].update({
                             "mode": document_plan.mode,
+                            "planned_mode": document_plan.mode,
                             "document_id": document_plan.document_id,
                             "file_size_bytes": document_plan.file_size_bytes,
                             "previous_queries": document_plan.previous_queries,
@@ -196,7 +197,16 @@ class AssistantService:
                             ).status
                             event["metadata"]["indexing_status"] = index_status
 
-                        if document_plan.mode == "document_rag" and index_status == "ready":
+                        use_document_rag = (
+                            index_status == "ready"
+                            and request.file_path.lower().endswith(tuple(EXTRACTABLE_EXTENSIONS))
+                        )
+                        if use_document_rag:
+                            route_decision = route_decision.model_copy(update={
+                                "document_mode": "document_rag",
+                                "document_reason": "El índice documental está listo y se reutiliza para esta consulta.",
+                            })
+                            event["metadata"]["mode"] = "document_rag"
                             retrieved = self.document_rag.retrieve(
                                 self.client,
                                 request.file_path,

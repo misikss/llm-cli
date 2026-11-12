@@ -41,7 +41,7 @@ La estrategia se decide en `document_rag.py` y queda registrada en
 | :--- | :--- | :--- |
 | Documento pequeño, extraíble o multimodal, y primeras consultas | `multimodal_direct` | Se envía el archivo completo al modelo, conservando el análisis nativo de Gemini. |
 | Documento mayor de 2 MB | `document_rag` | Se copia a caché local y se encola la extracción, el chunking y los embeddings; la primera respuesta no espera al worker. |
-| Mismo documento consultado tres veces por el usuario | `document_rag` | Si el índice está `ready`, se reutiliza con BM25 + vector search + RRF; si sigue pendiente, se mantiene el camino directo. |
+| Consulta posterior del mismo documento | `document_rag` | En cuanto el índice está `ready`, se reutiliza con BM25 + vector search + RRF; si sigue pendiente, se mantiene el camino directo. |
 | Imagen o audio | `multimodal_direct` | No se fuerza una extracción textual pobre; se conserva el análisis multimodal. |
 
 Los formatos con extracción local son TXT, CSV, TSV, XLSX, PDF y DOCX. Los
