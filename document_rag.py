@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import csv
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import logging
 from pathlib import Path
+import shutil
 import threading
 from typing import Literal
 
@@ -23,7 +25,9 @@ from google import genai
 
 from config import (
     DOCUMENT_BM25_TOP_K,
+    DOCUMENT_EMBED_BATCH_SIZE,
     DOCUMENT_HYBRID_TOP_K,
+    DOCUMENT_INDEX_WORKERS,
     DOCUMENT_RERANK_MIN_SCORE,
     DOCUMENT_RERANK_TOP_N,
     DOCUMENT_VECTOR_TOP_K,
@@ -94,6 +98,15 @@ class DocumentRetrieval:
     vector_candidates: int
     bm25_candidates: int
     source_ids: list[str]
+
+
+@dataclass(frozen=True)
+class DocumentIndexStatus:
+    """Estado observable de una indexación documental en segundo plano."""
+
+    status: Literal["not_indexed", "queued", "running", "ready", "failed"]
+    document_id: str
+    error: str | None = None
 
 
 def _load_registry() -> dict[str, dict[str, int]]:
@@ -340,6 +353,13 @@ class DocumentRAG:
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._bm25_indexes: dict[str, tuple[int, BM25Index]] = {}
+        self._index_executor = ThreadPoolExecutor(
+            max_workers=DOCUMENT_INDEX_WORKERS,
+            thread_name_prefix="document-indexer",
+        )
+        self._index_jobs: dict[str, Future] = {}
+        self._index_status: dict[str, DocumentIndexStatus] = {}
+        self._index_jobs_lock = threading.Lock()
 
     def _scope_where(self, *, user_id: str, conversation_id: str, doc_id: str) -> dict:
         return {
@@ -357,6 +377,161 @@ class DocumentRAG:
 
     def _scope_key(self, *, user_id: str, conversation_id: str, doc_id: str) -> str:
         return f"{user_id}:{conversation_id}:{doc_id}"
+
+    def _cached_source_path(self, file_path: str | Path, doc_id: str) -> Path:
+        """Conserva una copia local para que el worker sobreviva al upload HTTP."""
+        source = Path(file_path)
+        cache_dir = LOG_DIR / "document_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / f"{doc_id}{source.suffix.lower()}"
+        if not cached.exists():
+            temporary = cached.with_name(f".{cached.name}.tmp")
+            shutil.copyfile(source, temporary)
+            temporary.replace(cached)
+        return cached
+
+    def _scoped_chunk_count(self, where: dict) -> int:
+        data = self.collection.get(where=where)
+        return len(data.get("ids", []) or [])
+
+    def get_index_status(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        doc_id: str,
+    ) -> DocumentIndexStatus:
+        """Consulta el estado sin bloquear esperando al worker."""
+        key = self._scope_key(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            doc_id=doc_id,
+        )
+        where = self._scope_where(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            doc_id=doc_id,
+        )
+        try:
+            if self._scoped_chunk_count(where) > 0:
+                status = DocumentIndexStatus(status="ready", document_id=doc_id)
+                with self._index_jobs_lock:
+                    self._index_status[key] = status
+                return status
+        except Exception as exc:
+            logger.warning(
+                "document_index_status_failed error_type=%s document_id=%s",
+                type(exc).__name__,
+                doc_id,
+            )
+
+        with self._index_jobs_lock:
+            return self._index_status.get(
+                key,
+                DocumentIndexStatus(status="not_indexed", document_id=doc_id),
+            )
+
+    def queue_indexing(
+        self,
+        client: genai.Client,
+        file_path: str | Path,
+        *,
+        plan: DocumentPlan,
+        user_id: str,
+        conversation_id: str,
+    ) -> DocumentIndexStatus:
+        """Copia y encola la indexación sin bloquear la respuesta del chat."""
+        key = self._scope_key(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            doc_id=plan.document_id,
+        )
+        current = self.get_index_status(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            doc_id=plan.document_id,
+        )
+        if current.status == "ready":
+            return current
+
+        cached_path = self._cached_source_path(file_path, plan.document_id)
+        source_name = Path(file_path).name
+        with self._index_jobs_lock:
+            future = self._index_jobs.get(key)
+            if future is not None and not future.done():
+                return self._index_status.get(
+                    key,
+                    DocumentIndexStatus(status="queued", document_id=plan.document_id),
+                )
+
+            queued = DocumentIndexStatus(status="queued", document_id=plan.document_id)
+            self._index_status[key] = queued
+            self._index_jobs[key] = self._index_executor.submit(
+                self._run_index_job,
+                client,
+                cached_path,
+                plan,
+                user_id,
+                conversation_id,
+                source_name,
+                key,
+            )
+            return queued
+
+    def _run_index_job(
+        self,
+        client: genai.Client,
+        file_path: Path,
+        plan: DocumentPlan,
+        user_id: str,
+        conversation_id: str,
+        source_name: str,
+        key: str,
+    ) -> None:
+        with self._index_jobs_lock:
+            self._index_status[key] = DocumentIndexStatus(
+                status="running",
+                document_id=plan.document_id,
+            )
+
+        try:
+            usage_sink: dict = {}
+            lock = self._lock_for(key)
+            with lock:
+                chunks_indexed, chunks_added = self._ensure_indexed(
+                    client,
+                    file_path,
+                    plan=plan,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    usage_sink=usage_sink,
+                    source_name=source_name,
+                )
+            with self._index_jobs_lock:
+                self._index_status[key] = DocumentIndexStatus(
+                    status="ready",
+                    document_id=plan.document_id,
+                )
+            logger.info(
+                "document_index_ready document_id=%s chunks=%s added=%s embedding_calls=%s",
+                plan.document_id,
+                chunks_indexed,
+                chunks_added,
+                usage_sink.get("embedding_calls", 0),
+            )
+        except Exception as exc:
+            status = DocumentIndexStatus(
+                status="failed",
+                document_id=plan.document_id,
+                error=type(exc).__name__,
+            )
+            with self._index_jobs_lock:
+                self._index_status[key] = status
+            logger.warning(
+                "document_index_failed document_id=%s error_type=%s",
+                plan.document_id,
+                type(exc).__name__,
+            )
 
     def _get_scoped_documents(self, where: dict) -> list[RetrievalDocument]:
         data = self.collection.get(where=where)
@@ -396,6 +571,38 @@ class DocumentRAG:
             raise RetrievalError("El proveedor no devolvió un embedding para el documento.")
         return response.embeddings[0].values
 
+    def _embed_batch(
+        self,
+        client: genai.Client,
+        texts: list[str],
+        *,
+        usage_sink: dict,
+    ) -> list[list[float]]:
+        """Solicita embeddings en lote y conserva fallback por fragmento."""
+        try:
+            response = client.models.embed_content(
+                model=self.embedding_model,
+                contents=texts,
+            )
+            embeddings = getattr(response, "embeddings", None) or []
+            if len(embeddings) != len(texts):
+                raise RetrievalError("El proveedor devolvió un lote de embeddings incompleto.")
+            capture_usage(
+                usage_sink,
+                response,
+                model=self.embedding_model,
+                calls_key="calls",
+                prefix="embedding",
+            )
+            return [embedding.values for embedding in embeddings]
+        except Exception as exc:
+            logger.warning(
+                "document_embedding_batch_fallback error_type=%s batch_size=%s",
+                type(exc).__name__,
+                len(texts),
+            )
+            return [self._embed(client, text, usage_sink=usage_sink) for text in texts]
+
     def _ensure_indexed(
         self,
         client: genai.Client,
@@ -405,6 +612,7 @@ class DocumentRAG:
         user_id: str,
         conversation_id: str,
         usage_sink: dict,
+        source_name: str | None = None,
     ) -> tuple[int, int]:
         where = self._scope_where(
             user_id=user_id,
@@ -425,14 +633,21 @@ class DocumentRAG:
             f"{user_id}:{conversation_id}:{plan.document_id}".encode("utf-8")
         ).hexdigest()[:16]
         ids = [f"doc_{scope_id}_{index}" for index in range(len(chunks))]
-        embeddings = [self._embed(client, chunk.text, usage_sink=usage_sink) for chunk in chunks]
+        embeddings: list[list[float]] = []
+        for start in range(0, len(chunks), DOCUMENT_EMBED_BATCH_SIZE):
+            batch = chunks[start : start + DOCUMENT_EMBED_BATCH_SIZE]
+            embeddings.extend(self._embed_batch(
+                client,
+                [chunk.text for chunk in batch],
+                usage_sink=usage_sink,
+            ))
         metadata = [
             {
                 "user_id": user_id,
                 "conversation_id": conversation_id,
                 "document_id": plan.document_id,
                 "chunk_index": index,
-                "source_name": Path(file_path).name,
+                "source_name": source_name or Path(file_path).name,
                 "source_id": chunk.id,
                 "locator": chunk.locator,
                 "index_version": DOCUMENT_INDEX_VERSION,
@@ -458,6 +673,7 @@ class DocumentRAG:
         query: str,
         usage_sink: dict | None = None,
         n_results: int = DOCUMENT_HYBRID_TOP_K,
+        index_if_missing: bool = True,
     ) -> DocumentRetrieval:
         """Indexa si hace falta y ejecuta retrieval híbrido documental."""
         sink = usage_sink if usage_sink is not None else {}
@@ -473,14 +689,19 @@ class DocumentRAG:
         )
         lock = self._lock_for(scope_key)
         with lock:
-            chunks_indexed, _chunks_added = self._ensure_indexed(
-                client,
-                file_path,
-                plan=plan,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                usage_sink=sink,
-            )
+            if index_if_missing:
+                chunks_indexed, _chunks_added = self._ensure_indexed(
+                    client,
+                    file_path,
+                    plan=plan,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    usage_sink=sink,
+                )
+            else:
+                chunks_indexed = self._scoped_chunk_count(where)
+                if not chunks_indexed:
+                    raise RetrievalError("El índice documental todavía no está listo.")
 
         query_vector = self._embed(client, query, usage_sink=sink)
         results = self.collection.query(

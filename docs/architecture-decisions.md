@@ -71,8 +71,25 @@ retrieval y dashboard siguen funcionando juntos.
 
 ## ADR-008 — No introducir LangGraph en esta entrega
 
-**Decisión:** esta versión conserva un pipeline síncrono y modular.
+**Decisión:** esta versión conserva una orquestación síncrona y modular, con un
+worker local separado para la indexación documental.
 
 **Motivo:** el objetivo actual es cerrar una implementación entendible y
 observable. Un workflow persistente de investigación sería una ampliación
 distinta y no es necesario para estas decisiones documentales.
+
+## ADR-009 — Indexar documentos en segundo plano
+
+**Decisión:** todo documento con extracción local se copia a una caché
+persistente y se indexa mediante un worker local. La primera consulta no espera
+la indexación: usa el camino multimodal directo. Las consultas posteriores
+usan Document RAG cuando el estado del índice es `ready`.
+
+**Motivo:** la indexación de muchos chunks es trabajo de preparación, no una
+dependencia necesaria para responder la primera pregunta. Separar ambas cosas
+reduce el tiempo percibido y permite reutilizar el índice.
+
+**Límite:** el documento no se aplica automáticamente a preguntas no
+relacionadas. Para cambiar el contexto documental se debe adjuntar el archivo
+correspondiente; un selector explícito de `document_id` sería una ampliación
+posterior.

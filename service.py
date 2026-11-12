@@ -11,7 +11,7 @@ from google import genai
 from client import determine_route, execute_llm_call
 from config import GEMINI_API_KEY, GEMINI_MODEL
 from errors import ConfigurationError, InvalidRequestError, RequestExecutionError
-from document_rag import DocumentRAG, choose_document_plan
+from document_rag import EXTRACTABLE_EXTENSIONS, DocumentRAG, choose_document_plan
 from memory import HybridMemory
 from models import LLMResponse, CallMetrics, RouteDecision
 from observability import RequestTrace
@@ -185,7 +185,18 @@ class AssistantService:
                             "file_size_bytes": document_plan.file_size_bytes,
                             "previous_queries": document_plan.previous_queries,
                         })
-                        if document_plan.mode == "document_rag":
+                        index_status = "not_applicable"
+                        if request.file_path.lower().endswith(tuple(EXTRACTABLE_EXTENSIONS)):
+                            index_status = self.document_rag.queue_indexing(
+                                self.client,
+                                request.file_path,
+                                plan=document_plan,
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                            ).status
+                            event["metadata"]["indexing_status"] = index_status
+
+                        if document_plan.mode == "document_rag" and index_status == "ready":
                             retrieved = self.document_rag.retrieve(
                                 self.client,
                                 request.file_path,
@@ -194,6 +205,7 @@ class AssistantService:
                                 conversation_id=conversation_id,
                                 query=question,
                                 usage_sink=document_usage,
+                                index_if_missing=False,
                             )
                             document_context = retrieved.context
                             event["metadata"].update({
@@ -211,6 +223,15 @@ class AssistantService:
                             event["input_tokens"] = document_usage.get("embedding_input_tokens", 0)
                             event["output_tokens"] = document_usage.get("embedding_output_tokens", 0)
                         else:
+                            if document_plan.mode == "document_rag":
+                                reason = (
+                                    "El índice documental se está construyendo en segundo plano; "
+                                    "esta consulta usa análisis multimodal directo."
+                                )
+                                route_decision = route_decision.model_copy(update={
+                                    "document_mode": "multimodal_direct",
+                                    "document_reason": reason,
+                                })
                             event["metadata"]["delivery"] = "archivo completo al modelo multimodal"
                 except Exception as exc:
                     # Si la extracción/indexación local no está disponible, el archivo

@@ -345,6 +345,8 @@ class HybridMemory:
             n_results=5,
             usage_sink=usage_sink,
         )
+        vector_ids = [document.id for document in vector_candidates]
+        bm25_ids = bm25_index.search(query, keywords or [], top_k=8)
 
         from rag import hybrid_search, rerank_documents
         from config import RERANK_MIN_SCORE, RERANK_TOP_N
@@ -360,18 +362,42 @@ class HybridMemory:
 
         # 3. LLM Reranking
         if hybrid_candidates:
-            candidate_texts = [document.text for document in hybrid_candidates]
-            top_memories, tokens_rerank_in, tokens_rerank_out = rerank_documents(
-                client=genai_client,
-                query=query,
-                documents=candidate_texts,
-                top_n=RERANK_TOP_N,
-                min_score=RERANK_MIN_SCORE,
-                usage_sink=usage_sink,
+            top_vector = set(vector_ids[:3])
+            top_bm25 = set(bm25_ids[:3])
+            ranking_disagreement = bool(
+                top_bm25
+                and top_vector
+                and (
+                    vector_ids[0] != bm25_ids[0]
+                    or len(top_vector & top_bm25) < min(len(top_vector), len(top_bm25))
+                )
             )
+            if ranking_disagreement:
+                candidate_texts = [document.text for document in hybrid_candidates]
+                top_memories, tokens_rerank_in, tokens_rerank_out = rerank_documents(
+                    client=genai_client,
+                    query=query,
+                    documents=candidate_texts,
+                    top_n=RERANK_TOP_N,
+                    min_score=RERANK_MIN_SCORE,
+                    usage_sink=usage_sink,
+                )
+                if usage_sink is not None:
+                    usage_sink["reranker_used"] = True
+                    usage_sink["retrieval_mode"] = "hybrid_rrf_reranked"
+            else:
+                top_memories = [document.text for document in hybrid_candidates[:RERANK_TOP_N]]
+                if usage_sink is not None:
+                    usage_sink["reranker_used"] = False
+                    usage_sink["retrieval_mode"] = "hybrid_rrf"
             if top_memories:
                 recalled_text = " | ".join(top_memories)
-                context_parts.append(f"[Recuerdos filtrados y re-rankeados de ChromaDB]: {recalled_text}")
+                label = (
+                    "Recuerdos filtrados y re-rankeados de ChromaDB"
+                    if ranking_disagreement
+                    else "Recuerdos híbridos de ChromaDB"
+                )
+                context_parts.append(f"[{label}]: {recalled_text}")
 
         if not context_parts:
             return "", tokens_rerank_in, tokens_rerank_out

@@ -40,14 +40,16 @@ La estrategia se decide en `document_rag.py` y queda registrada en
 | Situación | Estrategia | Comportamiento |
 | :--- | :--- | :--- |
 | Documento pequeño, extraíble o multimodal, y primeras consultas | `multimodal_direct` | Se envía el archivo completo al modelo, conservando el análisis nativo de Gemini. |
-| Documento mayor de 2 MB | `document_rag` | Se extrae texto localmente, se divide conservando estructura, se indexa en `document_chunks` y se recupera con BM25 + vector search + RRF. |
-| Mismo documento consultado tres veces por el usuario | `document_rag` | Se reutiliza el índice persistente; no se vuelve a enviar el archivo completo como contexto. |
+| Documento mayor de 2 MB | `document_rag` | Se copia a caché local y se encola la extracción, el chunking y los embeddings; la primera respuesta no espera al worker. |
+| Mismo documento consultado tres veces por el usuario | `document_rag` | Si el índice está `ready`, se reutiliza con BM25 + vector search + RRF; si sigue pendiente, se mantiene el camino directo. |
 | Imagen o audio | `multimodal_direct` | No se fuerza una extracción textual pobre; se conserva el análisis multimodal. |
 
 Los formatos con extracción local son TXT, CSV, TSV, XLSX, PDF y DOCX. Los
 archivos XLS antiguos deben convertirse a XLSX o CSV para activar Document RAG.
-El registro de consultas guarda únicamente el hash del archivo, el usuario y
-el contador; no conserva la copia temporal subida por el usuario.
+El registro de consultas guarda el hash del archivo, el usuario y el contador.
+Para permitir indexación después de cerrar la petición HTTP, los formatos
+extraíbles se conservan en `logs/document_cache/`; la copia temporal del upload
+se elimina al terminar la solicitud.
 
 ## Chunking y retrieval documental
 
@@ -75,8 +77,15 @@ LLM reranker condicional
 ```
 
 El reranker se activa cuando los primeros resultados de BM25 y del buscador
-vectorial discrepan. Las consultas con resultados claramente alineados usan
-RRF directamente para no añadir una llamada innecesaria al proveedor.
+vectorial discrepan, tanto en Document RAG como en la memoria episódica. Las
+consultas con resultados claramente alineados usan RRF directamente para no
+añadir una llamada innecesaria al proveedor.
+
+La indexación documental es asíncrona. `DocumentRAG` mantiene un worker local
+con estados `queued`, `running`, `ready` y `failed`; los embeddings de un
+documento se solicitan en lotes. Mientras el índice no está listo, el servicio
+usa análisis multimodal directo y no bloquea la respuesta esperando la
+indexación.
 
 ## Decisiones de arquitectura
 
@@ -100,6 +109,10 @@ RRF directamente para no añadir una llamada innecesaria al proveedor.
 - BM25, vector search y RRF son el camino normal. El LLM reranker solo se
   ejecuta cuando BM25 y la búsqueda vectorial discrepan en sus candidatos
   principales.
+- La primera consulta de un archivo extraíble no espera la indexación: el
+  documento se conserva en caché local y el worker construye el índice en
+  segundo plano. El trace expone `indexing_status` para distinguir
+  `queued/running/ready/failed`.
 - El dashboard no permite editar IDs manualmente. El usuario activo se elige
   desde una lista local y “Nuevo usuario” crea una identidad aislada; la
   conversación y la sesión se generan automáticamente.
@@ -107,9 +120,9 @@ RRF directamente para no añadir una llamada innecesaria al proveedor.
   `session_id` se conserva para trazabilidad y para separar la Working Memory.
 - Cada solicitud produce un `trace_id` con etapas, errores sanitizados,
   fallbacks, tokens, coste y latencia.
-- No se añade LangGraph en esta entrega. El pipeline actual es deliberadamente
-  síncrono y mantiene una superficie pequeña para poder cerrar y evaluar esta
-  versión antes de introducir otra abstracción.
+- No se añade LangGraph en esta entrega. La orquestación sigue siendo síncrona
+  y explícita; solo la indexación documental se ejecuta en un worker de fondo
+  para no bloquear la respuesta.
 
 ## Evaluación del retrieval
 
@@ -145,4 +158,5 @@ Los logs persistentes son:
 
 El dashboard muestra estos datos en Output, Trace, Payload e History. Los
 archivos subidos se almacenan temporalmente durante la solicitud y se eliminan
-al terminar.
+al terminar; los documentos extraíbles tienen una copia local en
+`logs/document_cache/` para completar la indexación asíncrona.

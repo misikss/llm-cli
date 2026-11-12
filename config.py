@@ -51,6 +51,8 @@ DOCUMENT_BM25_TOP_K: int = 8
 DOCUMENT_HYBRID_TOP_K: int = 6
 DOCUMENT_RERANK_TOP_N: int = 3
 DOCUMENT_RERANK_MIN_SCORE: float = 0.45
+DOCUMENT_INDEX_WORKERS: int = 2
+DOCUMENT_EMBED_BATCH_SIZE: int = 16
 
 # Tarifas reales por modelo (USD por 1 millón de tokens)
 # Fuente: https://ai.google.dev/pricing

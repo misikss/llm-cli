@@ -15,7 +15,7 @@ flowchart TD
     Input["Entrada: pregunta + archivo"] --> Planner["Planner semántico"]
     Planner --> Document["Document Analysis"]
     Document -->|"pequeño / primera consulta"| Direct["XLSX/CSV/PDF/imagen/audio → multimodal directo"]
-    Document -->|"grande / consultado varias veces"| DocRAG["extracción estructural → chunks → BM25 + vector → RRF → reranker condicional"]
+    Document -->|"grande / consultado varias veces"| DocRAG["caché local → indexación asíncrona → BM25 + vector → RRF → reranker condicional"]
     Planner --> Memory["Memory Retrieval"]
     Planner --> Web["Web Grounding"]
     Direct --> Merge["Evidence Merger"]
@@ -26,11 +26,11 @@ flowchart TD
     Answer --> Update["Memory Update + Observability"]
 ```
 
-La decisión queda visible en `document_mode` y `document_reason`. Los archivos
-pequeños se envían completos al modelo; los mayores de 2 MB o consultados tres
-veces por el mismo usuario se extraen y se recuperan desde la colección
-`document_chunks` mediante Hybrid Search. Imagen y audio permanecen en el camino
-multimodal.
+La decisión queda visible en `document_mode` y `document_reason`. La primera
+consulta conserva el análisis directo mientras la indexación se encola en
+segundo plano. Cuando el índice está listo, los documentos mayores de 2 MB o
+consultados tres veces por el mismo usuario se recuperan desde `document_chunks`
+mediante Hybrid Search. Imagen y audio permanecen en el camino multimodal.
 
 Las decisiones completas están documentadas en
 [`docs/architecture.md`](docs/architecture.md) y
@@ -60,11 +60,14 @@ flowchart TD
     subgraph RAGPipeline ["Pipeline RAG Completo (Solo cuando se necesita)"]
         QE["rewrite_query()<br/>(Desambiguación + Keywords BM25)"] --> Hybrid["Hybrid Search (BM25 + ChromaDB)"]
         Hybrid --> RRF["Reciprocal Rank Fusion (RRF)"]
-        RRF --> LLMReranker["LLM Re-ranking<br/>(Gemini Structured Output)"]
+        RRF --> RerankGate{"¿BM25 y vectorial discrepan?"}
+        RerankGate -- "Sí" --> LLMReranker["LLM Re-ranking<br/>(Gemini Structured Output)"]
+        RerankGate -- "No" --> DirectContext["Candidatos RRF"]
         LLMReranker --> FilterScore{"Score ≥ RERANK_MIN_SCORE (0.45)"}
     end
     
     FilterScore --> LLMFinal["Generación Final Enriquecida"]
+    DirectContext --> LLMFinal
     WebGrounding --> LLMFinal
     WeatherTool --> LLMFinal
     DirectLLM --> LLMFinal
@@ -101,9 +104,10 @@ Cuando una consulta requiere memoria histórica (`rag_memory`), se activan los t
    - Búsqueda semántica densa con `gemini-embedding-2` en ChromaDB.
    - Fusión mediante Reciprocal Rank Fusion:
      $$RRF\_Score(d) = \sum_{m \in M} \frac{1}{60 + r_m(d)}$$
-3. **LLM Re-ranking (`rerank_documents`)**:
+3. **LLM Re-ranking condicional (`rerank_documents`)**:
    - Emplea `gemini-2.5-flash-lite` con Structured Output para evaluar la relevancia exacta de cada fragmento.
    - Es un reranker basado en LLM, no un Cross-Encoder local; evita cargar otro modelo en RAM.
+   - Solo se ejecuta cuando los rankings BM25 y vectorial discrepan en sus candidatos principales.
    - Parámetros centralizados en `config.py`: `RERANK_MIN_SCORE = 0.45` y `RERANK_TOP_N = 2`.
 
 ### 📄 Document RAG híbrido
@@ -123,6 +127,13 @@ La recuperación combina:
 El índice documental usa la colección `document_chunks` y `index_version=2`,
 separada de `episodic_memory`. El vector RAG simple queda como baseline
 conceptual para comparar contra Hybrid Search y Hybrid Search con reranking.
+
+La indexación no bloquea la primera respuesta: el archivo se copia a
+`logs/document_cache/`, un worker extrae sus secciones y solicita embeddings en
+lotes. Mientras el estado sea `queued` o `running`, la consulta usa el archivo
+directamente; cuando pasa a `ready`, las consultas posteriores pueden usar
+Hybrid Document RAG. El documento no se inyecta automáticamente en preguntas
+ajenas: para cambiar de contexto se adjunta el archivo correspondiente.
 
 ---
 
@@ -260,7 +271,7 @@ pip install -r requirements.txt
 python dashboard.py
 ```
 
-Abre [http://127.0.0.1:8000](http://127.0.0.1:8000). Puedes adjuntar PDF, XLSX, XLS, CSV, TSV, imágenes, audio, TXT o DOCX. El archivo se guarda temporalmente durante la solicitud, se envía al mismo flujo multimodal de Gemini y se elimina al terminar; el dashboard solo muestra sus metadatos.
+Abre [http://127.0.0.1:8000](http://127.0.0.1:8000). Puedes adjuntar PDF, XLSX, XLS, CSV, TSV, imágenes, audio, TXT o DOCX. La subida temporal se elimina al terminar; los formatos extraíbles se copian a `logs/document_cache/` para indexarse en segundo plano y el dashboard solo muestra sus metadatos.
 
 Arquitectura del dashboard:
 
