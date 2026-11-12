@@ -1,58 +1,87 @@
 # Arquitectura
 
-## Flujo de una consulta
+## Flujo principal
+
+El proyecto mantiene `AssistantService` como fuente de verdad para la CLI y el
+dashboard. El planificador combina dos decisiones: el router semántico para la
+intención de la pregunta y una estrategia determinista para el archivo
+adjunto. No se usan palabras clave como mecanismo principal de routing.
 
 ```mermaid
 flowchart TD
-    UserQuery["CLI / Dashboard / futura API<br/>Pregunta + archivo"] --> Context["Context scope<br/>user_id · session_id · conversation_id"]
-    Context --> Service["AssistantService<br/>caso de uso"]
-    Service --> WorkingMemory["Working Memory<br/>RAM"]
-    WorkingMemory --> Router["Semantic Router<br/>determine_route"]
-    Router --> Decision{"Ruta"}
+    Input["Entrada<br/>pregunta + archivo opcional"] --> Scope["Contexto aislado<br/>user_id · session_id · conversation_id"]
+    Scope --> Planner["Planificador<br/>router semántico + estrategia documental"]
 
-    Decision -->|general| Direct["Generación estructurada<br/>Pydantic"]
-    Decision -->|web_grounding| Grounding["Google Search<br/>Grounding"]
-    Decision -->|weather| Weather["Open-Meteo<br/>Tool Calling"]
-    Decision -->|rag_memory| QueryEngineering["rewrite_query"]
+    Planner --> Document["Análisis documental"]
+    Document -->|"pequeño / primera consulta"| Direct["Multimodal directo<br/>archivo completo a Gemini"]
+    Document -->|"grande / reutilizado"| DocumentRAG["Document RAG<br/>extracción + chunks + embeddings + retrieval"]
 
-    QueryEngineering --> Retrieval["Retrieval híbrido"]
-    Retrieval --> BM25["BM25 cacheado<br/>ranking léxico"]
-    Retrieval --> Vector["ChromaDB + embeddings<br/>ranking semántico"]
-    BM25 --> RRF["Reciprocal Rank Fusion<br/>por ID estable"]
-    Vector --> RRF
-    RRF --> Reranker["LLM reranker<br/>Gemini Structured Output"]
-    Reranker --> Final["Contexto recuperado"]
+    Planner --> Memory["Memory Retrieval<br/>solo si la intención pide historial"]
+    Memory --> Hybrid["BM25 + vectorial + RRF + LLM reranker"]
+    Planner --> Web["Web Grounding<br/>si la intención necesita información viva"]
 
-    Direct --> Answer["Respuesta final"]
-    Grounding --> Answer
-    Weather --> Answer
-    Final --> Answer
-    Answer --> Update["Actualizar memoria"]
-    Update --> Persist["ChromaDB + JSONL"]
-    Service --> Trace["RequestTrace<br/>trace_id + etapas + errores"]
-    Trace --> History["history.jsonl / errors.jsonl"]
+    Direct --> Evidence["Evidence Merger<br/>contexto documental + memoria + web"]
+    DocumentRAG --> Evidence
+    Hybrid --> Evidence
+    Web --> Evidence
+    Evidence --> Answer["Generación estructurada<br/>Pydantic / LLMResponse"]
+    Answer --> Update["Memory Update + Observability"]
+    Update --> Persist["ChromaDB + history.jsonl<br/>trace, tokens, coste, latencia"]
 
-    Dashboard["Dashboard local<br/>FastAPI + HTML/CSS/JS"] --> Context
+    Dashboard["Dashboard local<br/>FastAPI + HTML/CSS/JS"] --> Scope
+    CLI["CLI Rich"] --> Scope
 ```
 
-## Decisiones importantes
+## Estrategia documental
 
-- BM25 se construye una vez y se invalida cuando crece la colección de ChromaDB.
-- BM25, vector search y RRF usan IDs estables; el texto se recupera después para evitar colisiones entre documentos iguales.
-- El reranking se ejecuta solo sobre pocos candidatos y usa Gemini como LLM reranker. No se carga un cross-encoder local para mantener bajo el consumo de RAM.
-- Las consultas que no necesitan memoria no ejecutan el pipeline RAG.
-- `llm_cli.py` no contiene la lógica del caso de uso: solo convierte argumentos/input en `AskRequest` y presenta `AskResult`.
-- Los errores se clasifican como configuración, proveedor, cuota, modelo no disponible, retrieval, memoria o tool execution.
-- Cada solicitud produce un `trace_id` y registra latencia por etapa sin persistir secretos completos.
-- La medición de tokens cubre router, query rewriting, reranker, generación y memory update; embeddings registran cantidad de llamadas y tokens si el SDK los expone.
-- `user_id`, `conversation_id` y `session_id` viajan desde `AskRequest` hasta métricas, errores y memoria persistente.
-- ChromaDB filtra por `user_id + conversation_id`; `session_id` no participa en el filtro episódico para permitir reanudar el mismo chat en otra ejecución.
-- La Working Memory se guarda en un registro del servicio indexado por los tres IDs, evitando que dos chats activos compartan sujeto o hechos recientes.
-- Los documentos legacy sin IDs reciben el scope local por defecto mediante una migración idempotente al iniciar la memoria.
+La estrategia se decide en `document_rag.py` y queda registrada en
+`RouteDecision.document_mode` y `RouteDecision.document_reason`.
 
-## Evaluación
+| Situación | Estrategia | Comportamiento |
+| :--- | :--- | :--- |
+| Documento pequeño, extraíble o multimodal, y primeras consultas | `multimodal_direct` | Se envía el archivo completo al modelo, conservando el análisis nativo de Gemini. |
+| Documento mayor de 2 MB | `document_rag` | Se extrae texto localmente, se divide con solapamiento, se indexa en `document_chunks` y se recuperan los fragmentos relevantes. |
+| Mismo documento consultado tres veces por el usuario | `document_rag` | Se reutiliza el índice persistente; no se vuelve a enviar el archivo completo como contexto. |
+| Imagen o audio | `multimodal_direct` | No se fuerza una extracción textual pobre; se conserva el análisis multimodal. |
 
-El benchmark versionado en `benchmarks/` compara BM25, búsqueda vectorial, híbrido RRF y el híbrido con LLM reranker usando Hit@1, Hit@3, MRR@3 y latencia.
+Los formatos con extracción local son TXT, CSV, TSV, XLSX, PDF y DOCX. Los
+archivos XLS antiguos deben convertirse a XLSX o CSV para activar Document RAG.
+El registro de consultas guarda únicamente el hash del archivo, el usuario y
+el contador; no conserva la copia temporal subida por el usuario.
+
+## Decisiones de arquitectura
+
+- `AssistantService` sigue siendo la única fuente de verdad. El dashboard y la
+  CLI son adaptadores de entrada/salida.
+- El routing de intención es semántico. La heurística de palabras clave solo
+  existe como fallback cuando el proveedor no responde.
+- Document RAG es una capacidad acotada del pipeline actual, no un agente nuevo:
+  extrae, fragmenta, embebe y recupera; después entrega el contexto al mismo
+  generador estructurado.
+- Los chunks documentales viven en la colección ChromaDB `document_chunks`,
+  separada de `episodic_memory`.
+- La recuperación documental se aísla por `user_id + conversation_id +
+  document_id`; así un usuario no recibe chunks de otro contexto.
+- Si la extracción o el retrieval documental falla, el flujo conserva un
+  fallback observable al análisis multimodal directo.
+- Los archivos pequeños priorizan simplicidad y latencia. Los documentos
+  grandes o reutilizados priorizan coste de contexto y recuperación precisa.
+- El dashboard no permite editar IDs manualmente. El usuario activo se elige
+  desde una lista local y “Nuevo usuario” crea una identidad aislada; la
+  conversación y la sesión se generan automáticamente.
+- La memoria episódica se filtra por `user_id + conversation_id`. El
+  `session_id` se conserva para trazabilidad y para separar la Working Memory.
+- Cada solicitud produce un `trace_id` con etapas, errores sanitizados,
+  fallbacks, tokens, coste y latencia.
+- No se añade LangGraph en esta entrega. El pipeline actual es deliberadamente
+  síncrono y mantiene una superficie pequeña para poder cerrar y evaluar esta
+  versión antes de introducir otra abstracción.
+
+## Evaluación del retrieval
+
+El benchmark versionado en `benchmarks/` compara BM25, búsqueda vectorial,
+híbrido RRF y el híbrido con LLM reranker usando Hit@1, Hit@3, MRR@3 y
+latencia.
 
 ```mermaid
 flowchart LR
@@ -65,3 +94,20 @@ flowchart LR
     HybridEval --> Metrics
     RerankEval --> Metrics
 ```
+
+## Observabilidad
+
+Las etapas principales son `route`, `document_analysis`, `query_rewrite`,
+`retrieval`, `working_memory`, `generation` y `memory_update`. La etapa
+`document_analysis` expone si se usó multimodal directo o Document RAG, el hash
+del documento, su tamaño, las consultas previas y los chunks recuperados.
+
+Los logs persistentes son:
+
+- `logs/history.jsonl`: ejecuciones correctas con payload, trace y métricas.
+- `logs/errors.jsonl`: errores clasificados y sanitizados.
+- `logs/document_registry.json`: contador local por usuario y hash documental.
+
+El dashboard muestra estos datos en Output, Trace, Payload e History. Los
+archivos subidos se almacenan temporalmente durante la solicitud y se eliminan
+al terminar.

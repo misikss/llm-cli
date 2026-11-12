@@ -66,20 +66,22 @@
               <div class="field-group scope-group">
                 <div class="field-heading">
                   <label class="field-label">Context scope</label>
-                  <span class="field-hint">aislamiento</span>
+                  <span class="field-hint">aislamiento automático</span>
+                </div>
+                <div class="user-switcher">
+                  <span>USR</span>
+                  <select id="user-id" name="user_id" aria-label="Usuario activo"></select>
+                  <button class="add-user-button" id="new-user" type="button">+ Nuevo usuario</button>
                 </div>
                 <label class="input-with-prefix">
-                  <span>USR</span>
-                  <input id="user-id" name="user_id" type="text" autocomplete="off" />
-                </label>
-                <label class="input-with-prefix">
                   <span>CONV</span>
-                  <input id="conversation-id" name="conversation_id" type="text" autocomplete="off" />
+                  <input id="conversation-id" name="conversation_id" type="text" autocomplete="off" readonly aria-readonly="true" />
                 </label>
                 <label class="input-with-prefix">
                   <span>SESS</span>
-                  <input id="session-id" name="session_id" type="text" autocomplete="off" />
+                  <input id="session-id" name="session_id" type="text" autocomplete="off" readonly aria-readonly="true" />
                 </label>
+                <p class="scope-note">El usuario se cambia desde el selector. La conversación y la sesión se generan para mantener el aislamiento.</p>
               </div>
 
               <div class="mode-row">
@@ -208,6 +210,20 @@
           </section>
         </div>
       </main>
+
+      <dialog class="user-dialog" id="new-user-dialog" aria-labelledby="new-user-title">
+        <form method="dialog" id="new-user-form">
+          <p class="section-index">NUEVO CONTEXTO</p>
+          <h2 id="new-user-title">Crear usuario local</h2>
+          <p class="dialog-copy">El usuario será una identidad local para separar memoria, conversaciones e historial.</p>
+          <label class="field-label" for="new-user-id">ID del usuario</label>
+          <input class="dialog-input" id="new-user-id" name="new_user_id" type="text" maxlength="120" autocomplete="off" placeholder="ej. victor" required />
+          <div class="dialog-actions">
+            <button class="quiet-button" id="cancel-new-user" value="cancel" type="button">Cancelar</button>
+            <button class="submit-button dialog-submit" id="create-user" value="default" type="submit"><span>Crear usuario</span><span class="submit-arrow">↗</span></button>
+          </div>
+        </form>
+      </dialog>
 
       <footer class="footer">
         <span>LLM CLI / LOCAL OBSERVABILITY SURFACE</span>

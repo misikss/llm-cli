@@ -14,25 +14,87 @@ const setText = (selector, value) => {
   if (element) element.textContent = value ?? "—";
 };
 
-const state = {
-  userId: localStorage.getItem("llm_cli_user_id") || "local-user",
-  conversationId: localStorage.getItem("llm_cli_conversation_id") || makeId("conv"),
-  sessionId: sessionStorage.getItem("llm_cli_session_id") || makeId("sess"),
+const DEFAULT_USER = "local-user";
+const USERS_STORAGE_KEY = "llm_cli_users";
+const USER_SCOPES_STORAGE_KEY = "llm_cli_user_scopes";
+
+const readJson = (key, fallback) => {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "null");
+    return value ?? fallback;
+  } catch {
+    return fallback;
+  }
 };
 
+const readUsers = () => {
+  const saved = readJson(USERS_STORAGE_KEY, []);
+  const current = localStorage.getItem("llm_cli_user_id") || DEFAULT_USER;
+  const users = Array.isArray(saved)
+    ? saved.filter((user) => typeof user === "string" && user.trim())
+    : [];
+  return [...new Set([DEFAULT_USER, ...users, current])];
+};
+
+const readUserScope = (userId) => {
+  const scopes = readJson(USER_SCOPES_STORAGE_KEY, {});
+  return scopes[userId] || {
+    conversationId: makeId("conv"),
+    sessionId: makeId("sess"),
+  };
+};
+
+const state = {
+  users: readUsers(),
+  userId: localStorage.getItem("llm_cli_user_id") || DEFAULT_USER,
+  conversationId: "",
+  sessionId: "",
+};
+
+function saveUsers() {
+  localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(state.users));
+}
+
+function saveUserScope() {
+  const scopes = readJson(USER_SCOPES_STORAGE_KEY, {});
+  scopes[state.userId] = {
+    conversationId: state.conversationId,
+    sessionId: state.sessionId,
+  };
+  localStorage.setItem(USER_SCOPES_STORAGE_KEY, JSON.stringify(scopes));
+}
+
 function persistScope() {
-  state.userId = $("#user-id").value.trim() || "local-user";
-  state.conversationId = $("#conversation-id").value.trim() || "default-conversation";
-  state.sessionId = $("#session-id").value.trim() || "dashboard-session";
+  state.userId = $("#user-id").value || DEFAULT_USER;
+  state.conversationId = $("#conversation-id").value || makeId("conv");
+  state.sessionId = $("#session-id").value || makeId("sess");
+  if (!state.users.includes(state.userId)) state.users.push(state.userId);
+  saveUsers();
   localStorage.setItem("llm_cli_user_id", state.userId);
-  localStorage.setItem("llm_cli_conversation_id", state.conversationId);
-  sessionStorage.setItem("llm_cli_session_id", state.sessionId);
+  saveUserScope();
+}
+
+function renderUserOptions() {
+  const select = $("#user-id");
+  select.innerHTML = "";
+  state.users.forEach((userId) => {
+    const option = document.createElement("option");
+    option.value = userId;
+    option.textContent = userId;
+    select.appendChild(option);
+  });
+  select.value = state.userId;
 }
 
 function loadScope() {
-  $("#user-id").value = state.userId;
+  renderUserOptions();
+  const scope = readUserScope(state.userId);
+  state.conversationId = scope.conversationId;
+  state.sessionId = scope.sessionId;
   $("#conversation-id").value = state.conversationId;
   $("#session-id").value = state.sessionId;
+  saveUsers();
+  saveUserScope();
 }
 
 function resetTelemetry() {
@@ -69,7 +131,12 @@ function renderResponse(payload) {
   const request = payload.request || {};
 
   setText("#metric-route", route.route || metrics.routed_as || "—");
-  setText("#metric-route-reason", route.reason || "route selected");
+  setText(
+    "#metric-route-reason",
+    [route.reason, route.document_mode && route.document_mode !== "none" ? `documento: ${route.document_mode}` : ""]
+      .filter(Boolean)
+      .join(" · ") || "ruta seleccionada",
+  );
   setText("#metric-tokens", formatNumber(metrics.tokens_totales));
   setText("#metric-token-scope", metrics.token_usage_scope || "pipeline");
   setText("#metric-latency", formatLatency(metrics.total_latency_ms));
@@ -89,6 +156,7 @@ function renderResponse(payload) {
     ["user", request.user_id],
     ["conversation", request.conversation_id],
     ["session", request.session_id],
+    ["document", route.document_mode || "none"],
   ].forEach(([label, value]) => {
     const chip = document.createElement("span");
     chip.textContent = `${label}: ${value || "—"}`;
@@ -257,6 +325,67 @@ function newConversation() {
   refreshHistory();
 }
 
+function switchUser(userId) {
+  if (!userId || userId === state.userId) return;
+  persistScope();
+  state.userId = userId;
+  localStorage.setItem("llm_cli_user_id", state.userId);
+  const scope = readUserScope(state.userId);
+  state.conversationId = scope.conversationId;
+  state.sessionId = scope.sessionId;
+  $("#conversation-id").value = state.conversationId;
+  $("#session-id").value = state.sessionId;
+  renderUserOptions();
+  saveUserScope();
+  resetTelemetry();
+  refreshHistory();
+}
+
+function openNewUser() {
+  const dialog = $("#new-user-dialog");
+  $("#new-user-id").value = "";
+  $("#new-user-id").setCustomValidity("");
+  if (typeof dialog.showModal === "function") {
+    dialog.showModal();
+    $("#new-user-id").focus();
+  } else {
+    const userId = window.prompt("ID del nuevo usuario:");
+    if (userId) createUser(userId);
+  }
+}
+
+function createUser(userIdOrEvent) {
+  if (typeof userIdOrEvent !== "string") userIdOrEvent.preventDefault();
+  const input = $("#new-user-id");
+  const userId = (typeof userIdOrEvent === "string" ? userIdOrEvent : input.value).trim();
+  if (!userId || /[\r\n\t]/.test(userId)) {
+    input.setCustomValidity("Escribe un ID válido.");
+    input.reportValidity();
+    return;
+  }
+  if (state.users.includes(userId)) {
+    input.setCustomValidity("Ese usuario ya existe; selecciónalo desde el selector.");
+    input.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+  persistScope();
+  state.users.push(userId);
+  state.userId = userId;
+  state.conversationId = makeId("conv");
+  state.sessionId = makeId("sess");
+  renderUserOptions();
+  $("#conversation-id").value = state.conversationId;
+  $("#session-id").value = state.sessionId;
+  saveUsers();
+  localStorage.setItem("llm_cli_user_id", state.userId);
+  saveUserScope();
+  const dialog = $("#new-user-dialog");
+  if (dialog.open) dialog.close();
+  resetTelemetry();
+  refreshHistory();
+}
+
 loadScope();
 setupUpload();
 resetTelemetry();
@@ -265,7 +394,7 @@ refreshHistory();
 $("#ask-form").addEventListener("submit", submitRun);
 $("#refresh-history").addEventListener("click", refreshHistory);
 $("#new-conversation").addEventListener("click", newConversation);
-["#user-id", "#conversation-id", "#session-id"].forEach((selector) => $(selector).addEventListener("change", () => {
-  persistScope();
-  refreshHistory();
-}));
+$("#user-id").addEventListener("change", (event) => switchUser(event.target.value));
+$("#new-user").addEventListener("click", openNewUser);
+$("#new-user-form").addEventListener("submit", createUser);
+$("#cancel-new-user").addEventListener("click", () => $("#new-user-dialog").close());

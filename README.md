@@ -1,6 +1,39 @@
 # 🤖 LLM CLI — Gemini Modular con Semantic Router, Grounding y Zero-Waste RAG
 
+[![CI](https://github.com/misikss/llm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/misikss/llm-cli/actions/workflows/ci.yml)
+
 CLI profesional de ingeniería de IA para interactuar con la API oficial de **Google Gemini (`google-genai`)**, validado con **Pydantic**, con soporte para **imágenes/audio**, **Google Search Grounding en vivo**, **consulta de clima en tiempo real (Tool Calling)**, **Semantic Routing Few-Shot** y **Advanced RAG con Gatekeeper de Costo Cero (Zero-Waste RAG)**.
+
+## 🧭 Flujo documental adaptativo
+
+El sistema no trata todos los archivos igual. El planificador conserva el
+análisis multimodal directo para una consulta puntual y activa Document RAG
+cuando el archivo es grande o se reutiliza.
+
+```mermaid
+flowchart TD
+    Input["Entrada: pregunta + archivo"] --> Planner["Planner semántico"]
+    Planner --> Document["Document Analysis"]
+    Document -->|"pequeño / primera consulta"| Direct["XLSX/CSV/PDF/imagen/audio → multimodal directo"]
+    Document -->|"grande / consultado varias veces"| DocRAG["extracción → chunks → embeddings → retrieval"]
+    Planner --> Memory["Memory Retrieval"]
+    Planner --> Web["Web Grounding"]
+    Direct --> Merge["Evidence Merger"]
+    DocRAG --> Merge
+    Memory --> Merge
+    Web --> Merge
+    Merge --> Answer["Respuesta estructurada"]
+    Answer --> Update["Memory Update + Observability"]
+```
+
+La decisión queda visible en `document_mode` y `document_reason`. Los archivos
+pequeños se envían completos al modelo; los mayores de 2 MB o consultados tres
+veces por el mismo usuario se extraen y se recuperan desde la colección
+`document_chunks`. Imagen y audio permanecen en el camino multimodal.
+
+Las decisiones completas están documentadas en
+[`docs/architecture.md`](docs/architecture.md) y
+[`docs/architecture-decisions.md`](docs/architecture-decisions.md).
 
 ---
 
@@ -124,6 +157,7 @@ llm-cli/
 ├── models.py           ← Esquemas Pydantic (RouteDecision semántico, LLMResponse, CallMetrics)
 ├── tools.py            ← Herramientas ejecutables (Clima en tiempo real con Open-Meteo)
 ├── rag.py              ← Advanced RAG (rewrite_query, BM25, RRF y LLM Reranking)
+├── document_rag.py     ← Estrategia documental, extracción, chunks y retrieval persistente
 ├── memory.py           ← Memoria híbrida (RAM Working Memory + Episodic Memory en ChromaDB)
 ├── client.py           ← Lógica con Google GenAI SDK (Semantic Router Few-Shot, Grounding, Failover)
 ├── service.py          ← Caso de uso AssistantService, independiente de la CLI
@@ -134,10 +168,12 @@ llm-cli/
 ├── display.py          ← Renderizado de UI en consola con Rich y persistencia en JSONL
 ├── llm_cli.py          ← Punto de entrada principal y bucle interactivo optimizado
 ├── benchmarks/         ← Dataset y runner para evaluar retrieval
-├── docs/architecture.md ← Diagrama y decisiones de arquitectura
+├── docs/architecture.md ← Diagrama de flujo y decisiones de arquitectura
+├── docs/architecture-decisions.md ← Registro ADR en español
 ├── tests/              ← Tests unitarios del retrieval
 ├── .env                ← Variables de entorno (GEMINI_API_KEY, GEMINI_MODEL)
 ├── requirements.txt    ← Dependencias necesarias
+├── requirements-dev.txt ← Dependencias de desarrollo y pytest
 └── chroma_db/          ← Base de datos vectorial persistente con embeddings
 ```
 
@@ -213,14 +249,41 @@ Arquitectura del dashboard:
 flowchart LR
     Browser["Dashboard<br/>HTML + CSS + JS"] --> API["FastAPI<br/>/api/ask"]
     API --> Service["AssistantService"]
-    Service --> Pipeline["Router · RAG · Gemini<br/>Memory + ChromaDB"]
+    Service --> Planner["Router semántico<br/>+ estrategia documental"]
+    Planner --> Pipeline["Document Analysis · RAG · Gemini<br/>Memory + ChromaDB"]
     Service --> JSON["AskResult<br/>response + metrics + trace"]
     JSON --> API
     API --> Browser
     API --> Logs["history.jsonl<br/>errors.jsonl"]
 ```
 
-El `session_id`, `user_id` y `conversation_id` se editan desde el panel para poder probar conversaciones aisladas. El navegador conserva el usuario y conversación en `localStorage`, y la sesión en `sessionStorage`.
+El dashboard mantiene una lista local de usuarios. `+ Nuevo usuario` crea una
+identidad aislada y el selector permite volver a cualquiera de los usuarios ya
+creados. El usuario activo ya no se edita manualmente; `conversation_id` y
+`session_id` también son de solo lectura y se generan automáticamente para
+evitar mezclar memoria o historial. El navegador conserva estos scopes en
+`localStorage`.
+
+## 🎞️ Demo visual
+
+![Recorrido visual del dashboard](docs/demo.gif)
+
+El GIF muestra el recorrido del panel: entrada de pregunta y archivo,
+selección de contexto, respuesta y trace observable. Para ejecutar el
+dashboard real:
+
+```bash
+python dashboard.py
+```
+
+## ✅ Integración continua
+
+Cada push ejecuta la suite con `pytest` mediante GitHub Actions:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 ---
 

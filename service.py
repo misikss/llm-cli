@@ -11,6 +11,7 @@ from google import genai
 from client import determine_route, execute_llm_call
 from config import GEMINI_API_KEY, GEMINI_MODEL
 from errors import ConfigurationError, InvalidRequestError, RequestExecutionError
+from document_rag import DocumentRAG, choose_document_plan
 from memory import HybridMemory
 from models import LLMResponse, CallMetrics, RouteDecision
 from observability import RequestTrace
@@ -61,6 +62,7 @@ class AssistantService:
         self.session_id = session_id or f"sess_{uuid4().hex[:12]}"
         self.conversation_id = conversation_id
         self._memory_registry: dict[tuple[str, str, str], HybridMemory] = {}
+        self.document_rag = DocumentRAG(db_path=db_path)
         self.memory = memory or self._create_memory(
             user_id=self.user_id,
             session_id=self.session_id,
@@ -163,6 +165,62 @@ class AssistantService:
                 event["input_tokens"] = route_usage.get("input_tokens", 0)
                 event["output_tokens"] = route_usage.get("output_tokens", 0)
 
+            document_plan = None
+            document_context = ""
+            document_usage: dict = {}
+            if request.file_path:
+                try:
+                    with trace.stage("document_analysis") as event:
+                        document_plan = choose_document_plan(
+                            request.file_path,
+                            user_id=user_id,
+                        )
+                        route_decision = route_decision.model_copy(update={
+                            "document_mode": document_plan.mode,
+                            "document_reason": document_plan.reason,
+                        })
+                        event["metadata"].update({
+                            "mode": document_plan.mode,
+                            "document_id": document_plan.document_id,
+                            "file_size_bytes": document_plan.file_size_bytes,
+                            "previous_queries": document_plan.previous_queries,
+                        })
+                        if document_plan.mode == "document_rag":
+                            retrieved = self.document_rag.retrieve(
+                                self.client,
+                                request.file_path,
+                                plan=document_plan,
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                query=question,
+                                usage_sink=document_usage,
+                            )
+                            document_context = retrieved.context
+                            event["metadata"].update({
+                                "chunks_indexed": retrieved.chunks_indexed,
+                                "chunks_retrieved": retrieved.chunks_retrieved,
+                            })
+                            event["model"] = "gemini-embedding-2"
+                            event["input_tokens"] = document_usage.get("embedding_input_tokens", 0)
+                            event["output_tokens"] = document_usage.get("embedding_output_tokens", 0)
+                        else:
+                            event["metadata"]["delivery"] = "archivo completo al modelo multimodal"
+                except Exception as exc:
+                    # Si la extracción/indexación local no está disponible, el archivo
+                    # conserva el camino multimodal original para no romper la consulta.
+                    trace.add_fallback(
+                        "document_rag",
+                        "Se usó análisis multimodal directo porque el retrieval documental falló.",
+                        error_type=type(exc).__name__,
+                    )
+                    document_context = ""
+                    document_usage = {}
+                    if document_plan is not None:
+                        route_decision = route_decision.model_copy(update={
+                            "document_mode": "multimodal_direct",
+                            "document_reason": "Fallback multimodal por fallo en extracción o retrieval documental.",
+                        })
+
             rag_tokens = {
                 "query_eng_in": 0,
                 "query_eng_out": 0,
@@ -210,10 +268,22 @@ class AssistantService:
                     context_prefix = memory.get_working_memory_context()
                     event["metadata"]["has_context"] = bool(context_prefix)
 
+            if document_context:
+                context_prefix = (
+                    "[Contexto recuperado del documento adjunto]\n"
+                    + document_context
+                    + "\n\n"
+                    + context_prefix
+                )
+
             with trace.stage("generation") as event:
                 validated, metrics = execute_llm_call(
                     question=question,
-                    file_path=request.file_path,
+                    file_path=(
+                        None
+                        if route_decision.document_mode == "document_rag"
+                        else request.file_path
+                    ),
                     use_grounding=request.use_grounding,
                     use_weather=request.use_weather,
                     route_decision=route_decision,
@@ -274,7 +344,9 @@ class AssistantService:
                 retrieval_usage.get("embedding_calls", 0)
                 if route_decision.needs_memory_rag
                 else 0
-            ) + memory_usage.get("embedding_calls", 0)
+            ) + memory_usage.get("embedding_calls", 0) + document_usage.get("embedding_calls", 0)
+            metrics.tokens_embedding_in += document_usage.get("embedding_input_tokens", 0)
+            metrics.tokens_embedding_out += document_usage.get("embedding_output_tokens", 0)
             metrics.tokens_totales += (
                 metrics.tokens_router_in
                 + metrics.tokens_router_out
@@ -293,6 +365,9 @@ class AssistantService:
                 memory_usage.get("embedding_usage_available", True),
                 retrieval_usage.get("embedding_usage_available", True)
                 if route_decision.needs_memory_rag
+                else True,
+                document_usage.get("embedding_usage_available", True)
+                if document_plan is not None and document_plan.mode == "document_rag"
                 else True,
             ])
             metrics.token_usage_scope = "pipeline" if usage_available else "pipeline_partial"

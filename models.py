@@ -27,6 +27,14 @@ class RouteDecision(BaseModel):
     )
     reason: str = Field(..., description="Justificación breve de la decisión de enrutamiento.")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Nivel de certidumbre en la clasificación.")
+    document_mode: Literal["none", "multimodal_direct", "document_rag"] = Field(
+        default="none",
+        description="Estrategia aplicada al archivo adjunto: análisis multimodal directo o RAG documental.",
+    )
+    document_reason: str = Field(
+        default="No hay archivo adjunto.",
+        description="Motivo observable de la estrategia documental seleccionada.",
+    )
 
 
 class LLMResponse(BaseModel):
