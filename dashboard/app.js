@@ -285,7 +285,14 @@ async function submitRun(event) {
   $("#trace-pill").textContent = "RUNNING";
   try {
     const response = await fetch("/api/ask", { method: "POST", body: data });
-    const payload = await response.json();
+    const contentType = response.headers.get("content-type") || "";
+    let payload;
+    if (contentType.includes("application/json")) {
+      payload = await response.json();
+    } else {
+      const rawText = await response.text();
+      payload = { detail: rawText || `HTTP ${response.status}` };
+    }
     if (!response.ok) throw new Error(payload.detail || "Request failed.");
     renderResponse(payload);
     await refreshHistory();

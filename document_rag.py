@@ -281,11 +281,14 @@ def extract_document_sections(file_path: str | Path) -> list[DocumentSection]:
             from openpyxl import load_workbook
 
             workbook = load_workbook(path, read_only=True, data_only=True)
-            sections = []
-            for sheet in workbook.worksheets:
-                rows = list(sheet.iter_rows(values_only=True))
-                sections.extend(_rows_to_sections(rows, title=f"Hoja {sheet.title}"))
-            return sections
+            try:
+                sections = []
+                for sheet in workbook.worksheets:
+                    rows = list(sheet.iter_rows(values_only=True))
+                    sections.extend(_rows_to_sections(rows, title=f"Hoja {sheet.title}"))
+                return sections
+            finally:
+                workbook.close()
 
         if extension == ".pdf":
             from pypdf import PdfReader

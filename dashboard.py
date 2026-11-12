@@ -243,7 +243,13 @@ async def ask(
         return _serialize_result(result, request, file_metadata)
     finally:
         if temporary_path:
-            Path(temporary_path).unlink(missing_ok=True)
+            try:
+                Path(temporary_path).unlink(missing_ok=True)
+            except PermissionError:
+                # En Windows un lector externo puede tardar un instante en
+                # liberar el archivo; la limpieza no debe convertir una
+                # respuesta válida en un HTTP 500.
+                logger.warning("temporary_upload_cleanup_deferred path=%s", temporary_path)
 
 
 if __name__ == "__main__":
