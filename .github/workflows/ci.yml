@@ -21,4 +21,4 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
 
       - name: Ejecutar tests
-        run: pytest -q
+        run: python -m pytest -q

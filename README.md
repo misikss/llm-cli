@@ -282,7 +282,7 @@ Cada push ejecuta la suite con `pytest` mediante GitHub Actions:
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q
+python -m pytest -q
 ```
 
 ---
