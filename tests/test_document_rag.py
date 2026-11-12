@@ -7,6 +7,9 @@ from document_rag import (
     DIRECT_MAX_BYTES,
     choose_document_plan,
     chunk_text,
+    chunk_document_sections,
+    extract_document_sections,
+    DocumentSection,
 )
 
 
@@ -51,5 +54,24 @@ class DocumentStrategyTests(unittest.TestCase):
     def test_chunk_text_keeps_overlap(self) -> None:
         chunks = chunk_text("abcdefghijklmnop", size=10, overlap=3)
         self.assertEqual(chunks, ["abcdefghij", "hijklmnop"])
+
+    def test_structured_chunks_keep_document_locator(self) -> None:
+        chunks = chunk_document_sections(
+            [DocumentSection(text="venta V-003 por 2392", locator="Hoja Ventas · filas 1-2")],
+            doc_id="abc123",
+        )
+
+        self.assertEqual(chunks[0].id, "document_chunk:abc123:0")
+        self.assertEqual(chunks[0].locator, "Hoja Ventas · filas 1-2")
+
+    def test_csv_extraction_returns_row_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "ventas.csv"
+            document.write_text("id,total\nV-001,100\nV-002,200\n", encoding="utf-8")
+            sections = extract_document_sections(document)
+
+        self.assertEqual(len(sections), 1)
+        self.assertIn("V-002", sections[0].text)
+        self.assertIn("filas 1-3", sections[0].locator)
 if __name__ == "__main__":
     unittest.main()

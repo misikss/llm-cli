@@ -14,7 +14,7 @@ flowchart TD
 
     Planner --> Document["Análisis documental"]
     Document -->|"pequeño / primera consulta"| Direct["Multimodal directo<br/>archivo completo a Gemini"]
-    Document -->|"grande / reutilizado"| DocumentRAG["Document RAG<br/>extracción + chunks + embeddings + retrieval"]
+    Document -->|"grande / reutilizado"| DocumentRAG["Document RAG híbrido<br/>extracción + chunks + BM25 + vector + RRF"]
 
     Planner --> Memory["Memory Retrieval<br/>solo si la intención pide historial"]
     Memory --> Hybrid["BM25 + vectorial + RRF + LLM reranker"]
@@ -40,7 +40,7 @@ La estrategia se decide en `document_rag.py` y queda registrada en
 | Situación | Estrategia | Comportamiento |
 | :--- | :--- | :--- |
 | Documento pequeño, extraíble o multimodal, y primeras consultas | `multimodal_direct` | Se envía el archivo completo al modelo, conservando el análisis nativo de Gemini. |
-| Documento mayor de 2 MB | `document_rag` | Se extrae texto localmente, se divide con solapamiento, se indexa en `document_chunks` y se recuperan los fragmentos relevantes. |
+| Documento mayor de 2 MB | `document_rag` | Se extrae texto localmente, se divide conservando estructura, se indexa en `document_chunks` y se recupera con BM25 + vector search + RRF. |
 | Mismo documento consultado tres veces por el usuario | `document_rag` | Se reutiliza el índice persistente; no se vuelve a enviar el archivo completo como contexto. |
 | Imagen o audio | `multimodal_direct` | No se fuerza una extracción textual pobre; se conserva el análisis multimodal. |
 
@@ -49,6 +49,35 @@ archivos XLS antiguos deben convertirse a XLSX o CSV para activar Document RAG.
 El registro de consultas guarda únicamente el hash del archivo, el usuario y
 el contador; no conserva la copia temporal subida por el usuario.
 
+## Chunking y retrieval documental
+
+El chunking documental es estructural con fallback de ventana fija:
+
+- PDF: una sección por página.
+- XLSX/CSV/TSV: secciones por hoja o grupos de filas.
+- DOCX: grupos de párrafos y tablas.
+- TXT: párrafos separados por líneas vacías.
+- Texto sin estructura: ventanas de 1.800 caracteres con overlap de 250.
+
+Cada chunk conserva un `source_id` y un `locator` para poder identificar la
+hoja, página, tabla, filas o fragmento que llegó al generador.
+
+La recuperación documental combina dos rankings:
+
+```text
+BM25 + búsqueda vectorial
+          ↓
+        RRF
+          ↓
+  candidatos documentales
+          ↓
+LLM reranker condicional
+```
+
+El reranker se activa cuando los primeros resultados de BM25 y del buscador
+vectorial discrepan. Las consultas con resultados claramente alineados usan
+RRF directamente para no añadir una llamada innecesaria al proveedor.
+
 ## Decisiones de arquitectura
 
 - `AssistantService` sigue siendo la única fuente de verdad. El dashboard y la
@@ -56,16 +85,21 @@ el contador; no conserva la copia temporal subida por el usuario.
 - El routing de intención es semántico. La heurística de palabras clave solo
   existe como fallback cuando el proveedor no responde.
 - Document RAG es una capacidad acotada del pipeline actual, no un agente nuevo:
-  extrae, fragmenta, embebe y recupera; después entrega el contexto al mismo
-  generador estructurado.
+  extrae, fragmenta, indexa, combina BM25 con búsqueda vectorial mediante RRF y
+  puede re-rankear candidatos; después entrega el contexto al mismo generador
+  estructurado.
 - Los chunks documentales viven en la colección ChromaDB `document_chunks`,
-  separada de `episodic_memory`.
+  separada de `episodic_memory`. `index_version=2` evita mezclar índices
+  creados con el chunking fijo anterior.
 - La recuperación documental se aísla por `user_id + conversation_id +
   document_id`; así un usuario no recibe chunks de otro contexto.
 - Si la extracción o el retrieval documental falla, el flujo conserva un
   fallback observable al análisis multimodal directo.
 - Los archivos pequeños priorizan simplicidad y latencia. Los documentos
   grandes o reutilizados priorizan coste de contexto y recuperación precisa.
+- BM25, vector search y RRF son el camino normal. El LLM reranker solo se
+  ejecuta cuando BM25 y la búsqueda vectorial discrepan en sus candidatos
+  principales.
 - El dashboard no permite editar IDs manualmente. El usuario activo se elige
   desde una lista local y “Nuevo usuario” crea una identidad aislada; la
   conversación y la sesión se generan automáticamente.
@@ -100,7 +134,8 @@ flowchart LR
 Las etapas principales son `route`, `document_analysis`, `query_rewrite`,
 `retrieval`, `working_memory`, `generation` y `memory_update`. La etapa
 `document_analysis` expone si se usó multimodal directo o Document RAG, el hash
-del documento, su tamaño, las consultas previas y los chunks recuperados.
+del documento, su tamaño, las consultas previas, los chunks recuperados, los
+candidatos BM25/vectoriales, el modo RRF y si se usó reranker.
 
 Los logs persistentes son:
 

@@ -199,6 +199,13 @@ class AssistantService:
                             event["metadata"].update({
                                 "chunks_indexed": retrieved.chunks_indexed,
                                 "chunks_retrieved": retrieved.chunks_retrieved,
+                                "retrieval_mode": retrieved.retrieval_mode,
+                                "reranker_used": retrieved.reranker_used,
+                                "vector_candidates": retrieved.vector_candidates,
+                                "bm25_candidates": retrieved.bm25_candidates,
+                                "source_ids": retrieved.source_ids,
+                                "rerank_input_tokens": document_usage.get("rerank_input_tokens", 0),
+                                "rerank_output_tokens": document_usage.get("rerank_output_tokens", 0),
                             })
                             event["model"] = "gemini-embedding-2"
                             event["input_tokens"] = document_usage.get("embedding_input_tokens", 0)
@@ -224,8 +231,8 @@ class AssistantService:
             rag_tokens = {
                 "query_eng_in": 0,
                 "query_eng_out": 0,
-                "rerank_in": 0,
-                "rerank_out": 0,
+                "rerank_in": document_usage.get("rerank_input_tokens", 0),
+                "rerank_out": document_usage.get("rerank_output_tokens", 0),
             }
             rewrite_usage: dict = {}
             retrieval_usage: dict = {}
@@ -252,8 +259,8 @@ class AssistantService:
                         keywords=rewritten.search_keywords,
                         usage_sink=retrieval_usage,
                     )
-                    rag_tokens["rerank_in"] = t_rr_in
-                    rag_tokens["rerank_out"] = t_rr_out
+                    rag_tokens["rerank_in"] += t_rr_in
+                    rag_tokens["rerank_out"] += t_rr_out
                     event["input_tokens"] = t_rr_in
                     event["output_tokens"] = t_rr_out
                     event["model"] = retrieval_usage.get("model")
@@ -368,6 +375,9 @@ class AssistantService:
                 else True,
                 document_usage.get("embedding_usage_available", True)
                 if document_plan is not None and document_plan.mode == "document_rag"
+                else True,
+                document_usage.get("rerank_usage_available", True)
+                if document_usage.get("reranker_calls", 0) > 0
                 else True,
             ])
             metrics.token_usage_scope = "pipeline" if usage_available else "pipeline_partial"

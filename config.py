@@ -44,6 +44,14 @@ ERROR_LOG_FILE = LOG_DIR / "errors.jsonl"
 RERANK_MIN_SCORE: float = 0.45
 RERANK_TOP_N: int = 2
 
+# Parámetros de Document RAG. El reranking se activa solo cuando BM25 y la
+# búsqueda vectorial discrepan de forma relevante sobre los primeros candidatos.
+DOCUMENT_VECTOR_TOP_K: int = 8
+DOCUMENT_BM25_TOP_K: int = 8
+DOCUMENT_HYBRID_TOP_K: int = 6
+DOCUMENT_RERANK_TOP_N: int = 3
+DOCUMENT_RERANK_MIN_SCORE: float = 0.45
+
 # Tarifas reales por modelo (USD por 1 millón de tokens)
 # Fuente: https://ai.google.dev/pricing
 PRECIOS_MODELO: dict[str, dict[str, float]] = {

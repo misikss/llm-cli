@@ -15,7 +15,7 @@ flowchart TD
     Input["Entrada: pregunta + archivo"] --> Planner["Planner semántico"]
     Planner --> Document["Document Analysis"]
     Document -->|"pequeño / primera consulta"| Direct["XLSX/CSV/PDF/imagen/audio → multimodal directo"]
-    Document -->|"grande / consultado varias veces"| DocRAG["extracción → chunks → embeddings → retrieval"]
+    Document -->|"grande / consultado varias veces"| DocRAG["extracción estructural → chunks → BM25 + vector → RRF → reranker condicional"]
     Planner --> Memory["Memory Retrieval"]
     Planner --> Web["Web Grounding"]
     Direct --> Merge["Evidence Merger"]
@@ -29,7 +29,8 @@ flowchart TD
 La decisión queda visible en `document_mode` y `document_reason`. Los archivos
 pequeños se envían completos al modelo; los mayores de 2 MB o consultados tres
 veces por el mismo usuario se extraen y se recuperan desde la colección
-`document_chunks`. Imagen y audio permanecen en el camino multimodal.
+`document_chunks` mediante Hybrid Search. Imagen y audio permanecen en el camino
+multimodal.
 
 Las decisiones completas están documentadas en
 [`docs/architecture.md`](docs/architecture.md) y
@@ -104,6 +105,24 @@ Cuando una consulta requiere memoria histórica (`rag_memory`), se activan los t
    - Emplea `gemini-2.5-flash-lite` con Structured Output para evaluar la relevancia exacta de cada fragmento.
    - Es un reranker basado en LLM, no un Cross-Encoder local; evita cargar otro modelo en RAM.
    - Parámetros centralizados en `config.py`: `RERANK_MIN_SCORE = 0.45` y `RERANK_TOP_N = 2`.
+
+### 📄 Document RAG híbrido
+
+Los documentos grandes o reutilizados usan una variante separada del RAG de
+memoria. `document_rag.py` conserva la estructura disponible —páginas, hojas,
+tablas, párrafos y grupos de filas— y crea chunks con `source_id` y `locator`.
+
+La recuperación combina:
+
+1. BM25 para códigos, nombres, cifras y coincidencias exactas.
+2. Búsqueda vectorial en ChromaDB para similitud semántica.
+3. RRF para combinar ambos rankings.
+4. LLM reranker únicamente cuando los primeros resultados léxicos y semánticos
+   discrepan.
+
+El índice documental usa la colección `document_chunks` y `index_version=2`,
+separada de `episodic_memory`. El vector RAG simple queda como baseline
+conceptual para comparar contra Hybrid Search y Hybrid Search con reranking.
 
 ---
 

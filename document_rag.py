@@ -2,8 +2,8 @@
 
 Los archivos pequeños se mantienen en el flujo multimodal de Gemini. Los
 archivos extraíbles que superan el umbral, o que ya se consultaron varias
-veces, se convierten en texto, se fragmentan y se indexan en una colección
-separada de ChromaDB.
+veces, conservan su estructura, se indexan en ChromaDB y se recuperan con
+BM25, búsqueda vectorial, RRF y reranking LLM condicional.
 """
 
 from __future__ import annotations
@@ -21,9 +21,22 @@ import chromadb
 from chromadb.config import Settings
 from google import genai
 
-from config import LOG_DIR
+from config import (
+    DOCUMENT_BM25_TOP_K,
+    DOCUMENT_HYBRID_TOP_K,
+    DOCUMENT_RERANK_MIN_SCORE,
+    DOCUMENT_RERANK_TOP_N,
+    DOCUMENT_VECTOR_TOP_K,
+    LOG_DIR,
+)
 from errors import RetrievalError
 from observability import capture_usage
+from rag import (
+    BM25Index,
+    RetrievalDocument,
+    hybrid_search,
+    rerank_retrieval_documents,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +45,7 @@ DIRECT_MAX_BYTES = 2 * 1024 * 1024
 REUSE_THRESHOLD = 3
 CHUNK_SIZE = 1_800
 CHUNK_OVERLAP = 250
+DOCUMENT_INDEX_VERSION = 2
 REGISTRY_PATH = LOG_DIR / "document_registry.json"
 
 EXTRACTABLE_EXTENSIONS = {".txt", ".csv", ".tsv", ".xlsx", ".xls", ".pdf", ".docx"}
@@ -52,12 +66,34 @@ class DocumentPlan:
 
 
 @dataclass(frozen=True)
+class DocumentSection:
+    """Sección extraída conservando su ubicación lógica en el archivo."""
+
+    text: str
+    locator: str
+
+
+@dataclass(frozen=True)
+class DocumentChunk:
+    """Chunk recuperable con ID y procedencia estable."""
+
+    id: str
+    text: str
+    locator: str
+
+
+@dataclass(frozen=True)
 class DocumentRetrieval:
-    """Contexto recuperado y metadatos de indexación para una consulta."""
+    """Contexto recuperado y telemetría del pipeline documental."""
 
     context: str
     chunks_indexed: int
     chunks_retrieved: int
+    retrieval_mode: Literal["hybrid_rrf", "hybrid_rrf_reranked"]
+    reranker_used: bool
+    vector_candidates: int
+    bm25_candidates: int
+    source_ids: list[str]
 
 
 def _load_registry() -> dict[str, dict[str, int]]:
@@ -152,19 +188,45 @@ def _rows_to_text(rows: list[list[object]], title: str = "") -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
-def extract_document_text(file_path: str | Path) -> str:
-    """Extrae texto localmente para los formatos compatibles con document RAG."""
+def _rows_to_sections(
+    rows: list[list[object]],
+    *,
+    title: str,
+    rows_per_section: int = 40,
+) -> list[DocumentSection]:
+    if not rows:
+        return []
+    sections = []
+    for start in range(0, len(rows), rows_per_section):
+        end = min(start + rows_per_section, len(rows))
+        locator = f"{title} · filas {start + 1}-{end}"
+        text = _rows_to_text(rows[start:end], title=locator)
+        if text:
+            sections.append(DocumentSection(text=text, locator=locator))
+    return sections
+
+
+def extract_document_sections(file_path: str | Path) -> list[DocumentSection]:
+    """Extrae secciones locales conservando página, hoja, tabla o filas."""
     path = Path(file_path)
     extension = path.suffix.lower()
 
     try:
-        if extension in {".txt", ".csv", ".tsv"}:
-            if extension == ".txt":
-                return path.read_text(encoding="utf-8", errors="replace").strip()
+        if extension == ".txt":
+            paragraphs = [part.strip() for part in path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).split("\n\n") if part.strip()]
+            return [
+                DocumentSection(text=paragraph, locator=f"{path.name} · párrafo {index}")
+                for index, paragraph in enumerate(paragraphs, start=1)
+            ]
+
+        if extension in {".csv", ".tsv"}:
             delimiter = "," if extension == ".csv" else "\t"
             with path.open("r", encoding="utf-8", errors="replace", newline="") as stream:
                 rows = list(csv.reader(stream, delimiter=delimiter))
-            return _rows_to_text(rows, title=path.name)
+            return _rows_to_sections(rows, title=path.name)
 
         if extension in {".xlsx", ".xls"}:
             if extension == ".xls":
@@ -176,29 +238,38 @@ def extract_document_text(file_path: str | Path) -> str:
             workbook = load_workbook(path, read_only=True, data_only=True)
             sections = []
             for sheet in workbook.worksheets:
-                sections.append(_rows_to_text(list(sheet.iter_rows(values_only=True)), sheet.title))
-            return "\n\n".join(section for section in sections if section).strip()
+                rows = list(sheet.iter_rows(values_only=True))
+                sections.extend(_rows_to_sections(rows, title=f"Hoja {sheet.title}"))
+            return sections
 
         if extension == ".pdf":
             from pypdf import PdfReader
 
-            pages = []
+            sections = []
             for index, page in enumerate(PdfReader(str(path)).pages, start=1):
                 text = (page.extract_text() or "").strip()
                 if text:
-                    pages.append(f"[Página {index}]\n{text}")
-            return "\n\n".join(pages).strip()
+                    sections.append(DocumentSection(text=text, locator=f"Página {index}"))
+            return sections
 
         if extension == ".docx":
             from docx import Document
 
             document = Document(str(path))
-            paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs]
-            tables = []
+            sections = []
+            paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+            for start in range(0, len(paragraphs), 8):
+                end = min(start + 8, len(paragraphs))
+                sections.append(DocumentSection(
+                    text="\n".join(paragraphs[start:end]),
+                    locator=f"Párrafos {start + 1}-{end}",
+                ))
             for index, table in enumerate(document.tables, start=1):
                 rows = [[cell.text for cell in row.cells] for row in table.rows]
-                tables.append(_rows_to_text(rows, f"Tabla {index}"))
-            return "\n\n".join([*filter(None, paragraphs), *filter(None, tables)]).strip()
+                text = _rows_to_text(rows, f"Tabla {index}")
+                if text:
+                    sections.append(DocumentSection(text=text, locator=f"Tabla {index}"))
+            return sections
     except RetrievalError:
         raise
     except (OSError, ImportError, ValueError) as exc:
@@ -209,8 +280,13 @@ def extract_document_text(file_path: str | Path) -> str:
     raise RetrievalError(f"El formato {extension or 'desconocido'} no admite extracción RAG local.")
 
 
+def extract_document_text(file_path: str | Path) -> str:
+    """Compatibilidad: devuelve el texto unido de las secciones extraídas."""
+    return "\n\n".join(section.text for section in extract_document_sections(file_path)).strip()
+
+
 def chunk_text(text: str, *, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Divide el texto en fragmentos con solapamiento para preservar contexto."""
+    """Fallback de ventana fija con solapamiento para texto sin estructura."""
     clean = " ".join(text.split())
     if not clean:
         return []
@@ -223,6 +299,28 @@ def chunk_text(text: str, *, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLA
         if start and len(chunk) < overlap:
             break
         chunks.append(chunk)
+    return chunks
+
+
+def chunk_document_sections(
+    sections: list[DocumentSection],
+    *,
+    doc_id: str,
+) -> list[DocumentChunk]:
+    """Fragmenta secciones y conserva un ID estable de procedencia."""
+    chunks: list[DocumentChunk] = []
+    for section in sections:
+        section_chunks = chunk_text(section.text)
+        for fragment_index, text in enumerate(section_chunks, start=1):
+            locator = section.locator
+            if len(section_chunks) > 1:
+                locator = f"{locator} · fragmento {fragment_index}"
+            chunk_index = len(chunks)
+            chunks.append(DocumentChunk(
+                id=f"document_chunk:{doc_id}:{chunk_index}",
+                text=text,
+                locator=locator,
+            ))
     return chunks
 
 
@@ -241,6 +339,7 @@ class DocumentRAG:
         self.embedding_model = "gemini-embedding-2"
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._bm25_indexes: dict[str, tuple[int, BM25Index]] = {}
 
     def _scope_where(self, *, user_id: str, conversation_id: str, doc_id: str) -> dict:
         return {
@@ -248,12 +347,35 @@ class DocumentRAG:
                 {"user_id": user_id},
                 {"conversation_id": conversation_id},
                 {"document_id": doc_id},
+                {"index_version": DOCUMENT_INDEX_VERSION},
             ]
         }
 
     def _lock_for(self, key: str) -> threading.Lock:
         with self._locks_guard:
             return self._locks.setdefault(key, threading.Lock())
+
+    def _scope_key(self, *, user_id: str, conversation_id: str, doc_id: str) -> str:
+        return f"{user_id}:{conversation_id}:{doc_id}"
+
+    def _get_scoped_documents(self, where: dict) -> list[RetrievalDocument]:
+        data = self.collection.get(where=where)
+        ids = data.get("ids", []) or []
+        documents = data.get("documents", []) or []
+        return [
+            RetrievalDocument(id=str(chunk_id), text=text)
+            for chunk_id, text in zip(ids, documents)
+            if text
+        ]
+
+    def _get_bm25_index(self, *, where: dict, scope_key: str) -> BM25Index:
+        documents = self._get_scoped_documents(where)
+        cached = self._bm25_indexes.get(scope_key)
+        if cached is None or cached[0] != len(documents):
+            index = BM25Index(documents)
+            self._bm25_indexes[scope_key] = (len(documents), index)
+            return index
+        return cached[1]
 
     def _embed(
         self,
@@ -294,8 +416,8 @@ class DocumentRAG:
         if existing_ids:
             return len(existing_ids), 0
 
-        text = extract_document_text(file_path)
-        chunks = chunk_text(text)
+        sections = extract_document_sections(file_path)
+        chunks = chunk_document_sections(sections, doc_id=plan.document_id)
         if not chunks:
             raise RetrievalError("El documento no contiene texto extraíble para construir RAG.")
 
@@ -303,7 +425,7 @@ class DocumentRAG:
             f"{user_id}:{conversation_id}:{plan.document_id}".encode("utf-8")
         ).hexdigest()[:16]
         ids = [f"doc_{scope_id}_{index}" for index in range(len(chunks))]
-        embeddings = [self._embed(client, chunk, usage_sink=usage_sink) for chunk in chunks]
+        embeddings = [self._embed(client, chunk.text, usage_sink=usage_sink) for chunk in chunks]
         metadata = [
             {
                 "user_id": user_id,
@@ -311,10 +433,18 @@ class DocumentRAG:
                 "document_id": plan.document_id,
                 "chunk_index": index,
                 "source_name": Path(file_path).name,
+                "source_id": chunk.id,
+                "locator": chunk.locator,
+                "index_version": DOCUMENT_INDEX_VERSION,
             }
-            for index in range(len(chunks))
+            for index, chunk in enumerate(chunks)
         ]
-        self.collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadata)
+        self.collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            documents=[chunk.text for chunk in chunks],
+            metadatas=metadata,
+        )
         return len(chunks), len(chunks)
 
     def retrieve(
@@ -327,13 +457,23 @@ class DocumentRAG:
         conversation_id: str,
         query: str,
         usage_sink: dict | None = None,
-        n_results: int = 6,
+        n_results: int = DOCUMENT_HYBRID_TOP_K,
     ) -> DocumentRetrieval:
-        """Indexa si hace falta y recupera los chunks relevantes para la consulta."""
+        """Indexa si hace falta y ejecuta retrieval híbrido documental."""
         sink = usage_sink if usage_sink is not None else {}
-        lock = self._lock_for(f"{user_id}:{conversation_id}:{plan.document_id}")
+        scope_key = self._scope_key(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            doc_id=plan.document_id,
+        )
+        where = self._scope_where(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            doc_id=plan.document_id,
+        )
+        lock = self._lock_for(scope_key)
         with lock:
-            chunks_indexed, chunks_added = self._ensure_indexed(
+            chunks_indexed, _chunks_added = self._ensure_indexed(
                 client,
                 file_path,
                 plan=plan,
@@ -345,24 +485,101 @@ class DocumentRAG:
         query_vector = self._embed(client, query, usage_sink=sink)
         results = self.collection.query(
             query_embeddings=[query_vector],
-            n_results=min(n_results, chunks_indexed),
-            where=self._scope_where(
-                user_id=user_id,
-                conversation_id=conversation_id,
-                doc_id=plan.document_id,
-            ),
+            n_results=min(DOCUMENT_VECTOR_TOP_K, chunks_indexed),
+            where=where,
         )
-        documents = (results.get("documents") or [[]])[0]
-        if not documents:
+        vector_documents = [
+            RetrievalDocument(id=str(chunk_id), text=text)
+            for chunk_id, text in zip(
+                (results.get("ids") or [[]])[0],
+                (results.get("documents") or [[]])[0],
+            )
+            if text
+        ]
+        if not vector_documents:
             raise RetrievalError("El retrieval documental no devolvió fragmentos relevantes.")
 
-        source = Path(file_path).name
+        corpus_documents = self._get_scoped_documents(where)
+        bm25_index = self._get_bm25_index(where=where, scope_key=scope_key)
+        vector_ids = [document.id for document in vector_documents]
+        bm25_ids = bm25_index.search(query, top_k=DOCUMENT_BM25_TOP_K)
+        hybrid_documents = hybrid_search(
+            query_text=query,
+            keywords=[],
+            corpus_docs=corpus_documents,
+            vector_results=vector_documents,
+            top_k=min(n_results, chunks_indexed),
+            bm25_index=bm25_index,
+        )
+        if not hybrid_documents:
+            raise RetrievalError("El retrieval híbrido no devolvió candidatos documentales.")
+
+        # Si BM25 y el vectorial discrepan en los primeros resultados, la
+        # consulta es ambigua y merece una llamada adicional de reranking.
+        top_vector = set(vector_ids[:3])
+        top_bm25 = set(bm25_ids[:3])
+        ranking_disagreement = bool(
+            top_bm25
+            and top_vector
+            and (
+                vector_ids[0] != bm25_ids[0]
+                or len(top_vector & top_bm25) < min(len(top_vector), len(top_bm25))
+            )
+        )
+        reranker_used = False
+        reranked_documents = hybrid_documents
+        if ranking_disagreement and len(hybrid_documents) > 1:
+            rerank_usage: dict = {}
+            reranked_documents, rerank_in, rerank_out = rerank_retrieval_documents(
+                client=client,
+                query=query,
+                documents=hybrid_documents,
+                top_n=DOCUMENT_RERANK_TOP_N,
+                min_score=DOCUMENT_RERANK_MIN_SCORE,
+                usage_sink=rerank_usage,
+            )
+            sink["rerank_input_tokens"] = sink.get("rerank_input_tokens", 0) + rerank_in
+            sink["rerank_output_tokens"] = sink.get("rerank_output_tokens", 0) + rerank_out
+            sink["rerank_usage_available"] = rerank_usage.get("usage_available", True)
+            sink["reranker_calls"] = sink.get("reranker_calls", 0) + 1
+            reranker_used = True
+            if not reranked_documents:
+                reranked_documents = hybrid_documents[:DOCUMENT_RERANK_TOP_N]
+
+        metadata = self.collection.get(
+            ids=[document.id for document in reranked_documents],
+            include=["metadatas"],
+        ).get("metadatas", []) or []
+        metadata_by_id = {
+            document_id: dict(item or {})
+            for document_id, item in zip(
+                [document.id for document in reranked_documents],
+                metadata,
+            )
+        }
+        context_parts = []
+        source_ids = []
+        for document in reranked_documents:
+            item = metadata_by_id.get(document.id, {})
+            source_id = str(item.get("source_id") or document.id)
+            locator = str(item.get("locator") or Path(file_path).name)
+            source_ids.append(source_id)
+            context_parts.append(
+                f"[source_id={source_id} · {locator}]\n{document.text}"
+            )
+
         context = "\n\n".join(
-            f"[Fragmento documental {index + 1} · {source}]\n{document}"
-            for index, document in enumerate(documents)
+            context_parts
         )
         return DocumentRetrieval(
             context=context,
             chunks_indexed=chunks_indexed,
-            chunks_retrieved=len(documents),
+            chunks_retrieved=len(reranked_documents),
+            retrieval_mode=(
+                "hybrid_rrf_reranked" if reranker_used else "hybrid_rrf"
+            ),
+            reranker_used=reranker_used,
+            vector_candidates=len(vector_documents),
+            bm25_candidates=len(bm25_ids),
+            source_ids=source_ids,
         )

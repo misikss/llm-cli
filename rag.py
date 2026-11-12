@@ -239,17 +239,17 @@ def hybrid_search(
 # 4. LLM RERANKING
 # ──────────────────────────────────────────────────────────────────────────────
 
-def rerank_documents(
+def rerank_retrieval_documents(
     client: genai.Client,
     query: str,
-    documents: list[str],
+    documents: list[RetrievalDocument],
     top_n: int = RERANK_TOP_N,
     min_score: float = RERANK_MIN_SCORE,
     usage_sink: dict | None = None,
-) -> tuple[list[str], int, int]:
+) -> tuple[list[RetrievalDocument], int, int]:
     """
-    Aplica reordenamiento basado en LLM sobre los candidatos híbridos.
-    Evalúa la relevancia exacta de cada fragmento respecto a la pregunta del usuario.
+    Reordena documentos conservando sus IDs y metadata de procedencia.
+
     Retorna: (documentos_filtrados, tokens_in, tokens_out).
     """
     if not documents:
@@ -267,7 +267,7 @@ def rerank_documents(
         "Fragmentos candidatos:\n"
     )
     for idx, doc in enumerate(documents):
-        prompt += f"<document index=\"{idx}\">\n{doc}\n</document>\n"
+        prompt += f"<document index=\"{idx}\">\n{doc.text}\n</document>\n"
 
     try:
         from client import call_with_fallback
@@ -310,4 +310,28 @@ def rerank_documents(
 
     # Fallback si falla el reranker: retornar los primeros candidatos
     return documents[:top_n], 0, 0
+
+
+def rerank_documents(
+    client: genai.Client,
+    query: str,
+    documents: list[str],
+    top_n: int = RERANK_TOP_N,
+    min_score: float = RERANK_MIN_SCORE,
+    usage_sink: dict | None = None,
+) -> tuple[list[str], int, int]:
+    """Compatibilidad para usos que solo necesitan el texto re-rankeado."""
+    candidates = [
+        RetrievalDocument(id=str(index), text=document)
+        for index, document in enumerate(documents)
+    ]
+    selected, tokens_in, tokens_out = rerank_retrieval_documents(
+        client=client,
+        query=query,
+        documents=candidates,
+        top_n=top_n,
+        min_score=min_score,
+        usage_sink=usage_sink,
+    )
+    return [document.text for document in selected], tokens_in, tokens_out
 

@@ -15,16 +15,29 @@ Permite cambiar la interfaz sin alterar el pipeline.
 
 **Decisión:** los documentos pequeños se envían completos al modelo multimodal.
 Los documentos mayores de 2 MB o consultados al menos tres veces por el mismo
-usuario se extraen, fragmentan e indexan en ChromaDB.
+usuario se extraen, fragmentan e indexan en ChromaDB mediante un retrieval
+híbrido: BM25, búsqueda vectorial, RRF y reranking LLM condicional.
 
 **Motivo:** el análisis directo ofrece mejor simplicidad para una consulta
 puntual; Document RAG evita repetir un contexto grande cuando el archivo se
-reutiliza.
+reutiliza. BM25 recupera códigos, nombres y cifras exactas; la búsqueda
+vectorial recupera formulaciones semánticamente parecidas.
 
 **Límite:** imágenes y audio permanecen en el camino multimodal. XLS antiguo
 requiere conversión a XLSX o CSV para extracción local.
 
-## ADR-003 — Aislar los chunks documentales
+## ADR-003 — Usar chunking estructural antes que late chunking
+
+**Decisión:** PDF, DOCX y TXT conservan páginas, párrafos y tablas; XLSX, CSV
+y TSV conservan hojas y grupos de filas. El texto sin estructura usa ventanas
+de 1.800 caracteres con 250 de solapamiento.
+
+**Motivo:** este enfoque conserva procedencia, funciona con datos tabulares y no
+requiere cargar otro modelo local. Late chunking queda fuera de esta versión
+porque necesita soporte específico del modelo de embeddings y no aporta una
+ventaja demostrada para las tablas del proyecto.
+
+## ADR-004 — Aislar los chunks documentales
 
 **Decisión:** Document RAG usa la colección `document_chunks`, con filtro por
 `user_id`, `conversation_id` y hash del documento.
@@ -32,7 +45,7 @@ requiere conversión a XLSX o CSV para extracción local.
 **Motivo:** los chunks de un archivo no deben mezclarse con recuerdos
 episódicos ni cruzarse entre usuarios o conversaciones.
 
-## ADR-004 — Fallback seguro al multimodal directo
+## ADR-005 — Fallback seguro al multimodal directo
 
 **Decisión:** si falla la extracción, el embedding o el retrieval documental,
 se registra un fallback y se conserva el envío multimodal original.
@@ -40,7 +53,7 @@ se registra un fallback y se conserva el envío multimodal original.
 **Motivo:** el nuevo camino mejora documentos grandes sin romper el caso base
 que ya funcionaba.
 
-## ADR-005 — Contexto del dashboard generado, no editable
+## ADR-006 — Contexto del dashboard generado, no editable
 
 **Decisión:** el dashboard mantiene una lista local de usuarios, permite crear
 uno nuevo y permite cambiar entre los ya creados. `conversation_id` y
@@ -49,14 +62,14 @@ uno nuevo y permite cambiar entre los ya creados. `conversation_id` y
 **Motivo:** evita que una edición manual mezcle accidentalmente memoria o
 historial y hace explícita la separación de contexto.
 
-## ADR-006 — CI mínima reproducible
+## ADR-007 — CI mínima reproducible
 
 **Decisión:** GitHub Actions instala `requirements-dev.txt` y ejecuta `pytest`.
 
 **Motivo:** cada push debe comprobar que la capa de servicio, documentos,
 retrieval y dashboard siguen funcionando juntos.
 
-## ADR-007 — No introducir LangGraph en esta entrega
+## ADR-008 — No introducir LangGraph en esta entrega
 
 **Decisión:** esta versión conserva un pipeline síncrono y modular.
 
