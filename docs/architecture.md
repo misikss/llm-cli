@@ -87,9 +87,9 @@ documento se solicitan en lotes. Mientras el índice no está listo, el servicio
 usa análisis multimodal directo y no bloquea la respuesta esperando la
 indexación. Antes de seleccionar ese camino, el planificador estima los tokens
 extraídos y fuerza Document RAG si supera 350.000 tokens. En ese caso, si la
-primera consulta aún no tiene índice, se espera al worker o se ejecuta una
-indexación síncrona de seguridad; nunca se envía el archivo completo a una
-llamada que probablemente supere el límite del proveedor. Los lotes de
+primera consulta aún no tiene índice, devuelve un resultado controlado mientras
+el worker continúa; nunca se envía el archivo completo a una llamada que
+probablemente supere el límite del proveedor. Los lotes de
 embeddings respetan simultáneamente 15.000 tokens y 64 chunks, con un máximo
 preventivo de 6.000 tokens por chunk.
 
@@ -123,6 +123,9 @@ preventivo de 6.000 tokens por chunk.
   350.000 tokens fuerza Document RAG; si la indexación falla, devuelve un
   resultado controlado y observable en lugar de intentar el multimodal directo
   y provocar un error 500 por exceso de contexto.
+- Los embeddings se escriben por lote en ChromaDB. Si la cuota devuelve 429,
+  el worker respeta el `Retry-After` con backoff y reanuda desde los chunks ya
+  persistidos, sin comenzar el documento desde cero.
 - La prueba de estrés registrada en `logs/errors.jsonl` mostró un XLSX de
   784.455 bytes y 2.913.509 caracteres extraídos, aproximadamente 832.576
   tokens. Ese caso motivó el techo preventivo y el batching dinámico por

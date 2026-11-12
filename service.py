@@ -270,24 +270,25 @@ class AssistantService:
                         )
                         retrieved = None
                         if not use_document_rag and document_plan.mode == "document_rag":
-                            # Un documento que ya fue clasificado como RAG no
-                            # puede caer al multimodal: podría superar el
-                            # límite de entrada. Se espera al worker o se
-                            # construye el índice de forma síncrona como
-                            # excepción de seguridad.
-                            event["metadata"]["indexing_execution"] = "foreground_safety"
-                            retrieved = self.document_rag.retrieve(
-                                self.client,
-                                request.file_path,
-                                plan=document_plan,
-                                user_id=user_id,
-                                conversation_id=conversation_id,
-                                query=question,
-                                usage_sink=document_usage,
-                                index_if_missing=True,
+                            # Nunca se envía completo un documento que el
+                            # planificador clasificó como RAG. La indexación
+                            # continúa en background y esta petición termina
+                            # de forma controlada, especialmente importante
+                            # cuando la cuota de embeddings está agotada.
+                            event["status"] = "fallback"
+                            event["metadata"]["indexing_execution"] = "background_controlled"
+                            event["metadata"]["delivery"] = "respuesta controlada mientras indexa"
+                            return self._controlled_document_result(
+                                request,
+                                trace,
+                                route_decision,
+                                route_source=route_source,
+                                message=(
+                                    "El documento es demasiado grande para enviarlo completo. "
+                                    f"La indexación RAG está en estado {index_status}; reintenta "
+                                    "la consulta cuando termine para obtener el resumen."
+                                ),
                             )
-                            index_status = "ready"
-                            event["metadata"]["indexing_status"] = index_status
 
                         if use_document_rag:
                             route_decision = route_decision.model_copy(update={

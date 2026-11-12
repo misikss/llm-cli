@@ -90,9 +90,10 @@ dependencia necesaria para responder la primera pregunta. Separar ambas cosas
 reduce el tiempo percibido y permite reutilizar el índice.
 
 **Límite:** si el planificador detecta un documento por encima del presupuesto
-seguro de multimodal, la primera consulta puede esperar al índice como
-excepción de seguridad. Si esa indexación falla, se devuelve un resultado
-controlado y no se intenta enviar el archivo completo. El documento no se aplica automáticamente a preguntas no
+seguro de multimodal, la primera consulta devuelve un estado controlado mientras
+el worker continúa. Si la cuota se agota, el worker reintenta con backoff y
+reanuda desde los lotes persistidos; no se intenta enviar el archivo completo.
+El documento no se aplica automáticamente a preguntas no
 relacionadas. Para cambiar el contexto documental se debe adjuntar el archivo
 correspondiente; un selector explícito de `document_id` sería una ampliación
 posterior.

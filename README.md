@@ -133,9 +133,10 @@ La indexación no bloquea la primera respuesta: el archivo se copia a
 lotes. En documentos dentro del presupuesto, mientras el estado sea `queued` o
 `running`, la consulta usa el archivo directamente; cuando pasa a `ready`, las
 consultas posteriores pueden usar Hybrid Document RAG. Si el planificador
-detecta que el archivo no cabe de forma segura, espera al índice como excepción
-de seguridad. El documento no se inyecta automáticamente en preguntas ajenas:
-para cambiar de contexto se adjunta el archivo correspondiente.
+detecta que el archivo no cabe de forma segura, devuelve un estado controlado
+mientras el worker continúa; nunca intenta enviarlo completo. El documento no
+se inyecta automáticamente en preguntas ajenas: para cambiar de contexto se
+adjunta el archivo correspondiente.
 
 Antes de elegir multimodal directo, el planificador estima los tokens del texto
 extraído. Con un presupuesto preventivo de 350.000 tokens fuerza Document RAG
@@ -151,10 +152,10 @@ camino multimodal y el proveedor lo rechazó por superar el máximo de 1.048.576
 tokens (`trace_id=req_5d9b3764a700`, registrado en `logs/errors.jsonl`).
 
 La protección actual detecta ese tamaño antes de generar, fuerza Document RAG,
-divide los embeddings por presupuesto de tokens y chunks, y usa una indexación
-síncrona de seguridad en la primera consulta si todavía no existe índice. Si el
-proveedor sigue fallando, el dashboard recibe un mensaje controlado en lugar de
-un error HTTP 500.
+divide los embeddings por presupuesto de tokens y chunks, y mantiene la
+indexación en segundo plano. Si la cuota del proveedor está agotada, el
+dashboard recibe un estado controlado y el worker reintenta con backoff sin
+reprocesar los chunks ya indexados.
 
 ---
 

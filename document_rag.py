@@ -16,8 +16,10 @@ import json
 import logging
 import math
 from pathlib import Path
+import re
 import shutil
 import threading
+import time
 from typing import Literal
 
 import chromadb
@@ -29,6 +31,9 @@ from config import (
     DOCUMENT_EMBED_MAX_CHUNKS_BATCH,
     DOCUMENT_EMBED_MAX_TOKENS_BATCH,
     DOCUMENT_EMBED_MAX_TOKENS_PER_TEXT,
+    DOCUMENT_EMBED_BACKOFF_SECONDS,
+    DOCUMENT_EMBED_MAX_BACKOFF_SECONDS,
+    DOCUMENT_EMBED_RETRIES,
     DOCUMENT_HYBRID_TOP_K,
     DOCUMENT_DIRECT_TOKEN_LIMIT,
     DOCUMENT_INDEX_WORKERS,
@@ -159,6 +164,21 @@ def estimate_document_tokens(text: str) -> int:
     if not text:
         return 0
     return math.ceil(len(text) / 3.5)
+
+
+def _is_embedding_quota_error(exc: Exception) -> bool:
+    message = str(exc).upper()
+    return "RESOURCE_EXHAUSTED" in message or "429" in message or "QUOTA" in message
+
+
+def _embedding_retry_delay(exc: Exception, attempt: int) -> float:
+    match = re.search(r"retry in\s+([\d.]+)s", str(exc).lower())
+    if match:
+        return min(float(match.group(1)), DOCUMENT_EMBED_MAX_BACKOFF_SECONDS)
+    return min(
+        DOCUMENT_EMBED_BACKOFF_SECONDS * (2 ** attempt),
+        DOCUMENT_EMBED_MAX_BACKOFF_SECONDS,
+    )
 
 
 def choose_document_plan(
@@ -477,7 +497,19 @@ class DocumentRAG:
             doc_id=doc_id,
         )
         try:
-            if self._scoped_chunk_count(where) > 0:
+            data = self.collection.get(where=where, include=["metadatas"])
+            ids = data.get("ids", []) or []
+            metadatas = data.get("metadatas", []) or []
+            totals = {
+                int(metadata.get("chunk_total"))
+                for metadata in metadatas
+                if metadata and metadata.get("chunk_total") is not None
+            }
+            # Índices anteriores se escribían de una sola vez y no tienen
+            # chunk_total; los nuevos pueden quedar parciales si la cuota corta
+            # un lote de embeddings.
+            complete = bool(ids) and (not totals or len(ids) >= max(totals))
+            if complete:
                 status = DocumentIndexStatus(status="ready", document_id=doc_id)
                 with self._index_jobs_lock:
                     self._index_status[key] = status
@@ -653,29 +685,43 @@ class DocumentRAG:
             )
         ):
             raise RetrievalError("El lote de embeddings supera el presupuesto preventivo.")
-        try:
-            response = client.models.embed_content(
-                model=self.embedding_model,
-                contents=texts,
-            )
-            embeddings = getattr(response, "embeddings", None) or []
-            if len(embeddings) != len(texts):
-                raise RetrievalError("El proveedor devolvió un lote de embeddings incompleto.")
-            capture_usage(
-                usage_sink,
-                response,
-                model=self.embedding_model,
-                calls_key="calls",
-                prefix="embedding",
-            )
-            return [embedding.values for embedding in embeddings]
-        except Exception as exc:
-            logger.warning(
-                "document_embedding_batch_fallback error_type=%s batch_size=%s",
-                type(exc).__name__,
-                len(texts),
-            )
-            return [self._embed(client, text, usage_sink=usage_sink) for text in texts]
+        for attempt in range(DOCUMENT_EMBED_RETRIES + 1):
+            try:
+                response = client.models.embed_content(
+                    model=self.embedding_model,
+                    contents=texts,
+                )
+                embeddings = getattr(response, "embeddings", None) or []
+                if len(embeddings) != len(texts):
+                    raise RetrievalError("El proveedor devolvió un lote de embeddings incompleto.")
+                capture_usage(
+                    usage_sink,
+                    response,
+                    model=self.embedding_model,
+                    calls_key="calls",
+                    prefix="embedding",
+                )
+                return [embedding.values for embedding in embeddings]
+            except Exception as exc:
+                if _is_embedding_quota_error(exc):
+                    if attempt >= DOCUMENT_EMBED_RETRIES:
+                        raise
+                    delay = _embedding_retry_delay(exc, attempt)
+                    logger.warning(
+                        "document_embedding_quota_backoff attempt=%s delay_seconds=%.1f batch_size=%s",
+                        attempt + 1,
+                        delay,
+                        len(texts),
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.warning(
+                    "document_embedding_batch_fallback error_type=%s batch_size=%s",
+                    type(exc).__name__,
+                    len(texts),
+                )
+                return [self._embed(client, text, usage_sink=usage_sink) for text in texts]
+        raise RetrievalError("No se pudo obtener el lote de embeddings.")
 
     def _ensure_indexed(
         self,
@@ -694,9 +740,7 @@ class DocumentRAG:
             doc_id=plan.document_id,
         )
         existing = self.collection.get(where=where)
-        existing_ids = existing.get("ids", []) or []
-        if existing_ids:
-            return len(existing_ids), 0
+        existing_ids = set(existing.get("ids", []) or [])
 
         sections = extract_document_sections(file_path)
         chunks = chunk_document_sections(sections, doc_id=plan.document_id)
@@ -707,36 +751,45 @@ class DocumentRAG:
             f"{user_id}:{conversation_id}:{plan.document_id}".encode("utf-8")
         ).hexdigest()[:16]
         ids = [f"doc_{scope_id}_{index}" for index in range(len(chunks))]
-        embeddings: list[list[float]] = []
+        chunks_added = 0
         embedding_batches = 0
         for batch in iter_embedding_batches(chunks):
+            pending = [
+                (index, chunk, ids[index])
+                for index, chunk in enumerate(chunks)
+                if ids[index] not in existing_ids and chunk in batch
+            ]
+            if not pending:
+                continue
             embedding_batches += 1
-            embeddings.extend(self._embed_batch(
+            batch_embeddings = self._embed_batch(
                 client,
-                [chunk.text for chunk in batch],
+                [chunk.text for _, chunk, _ in pending],
                 usage_sink=usage_sink,
-            ))
+            )
+            self.collection.add(
+                ids=[chunk_id for _, _, chunk_id in pending],
+                embeddings=batch_embeddings,
+                documents=[chunk.text for _, chunk, _ in pending],
+                metadatas=[
+                    {
+                        "user_id": user_id,
+                        "conversation_id": conversation_id,
+                        "document_id": plan.document_id,
+                        "chunk_index": index,
+                        "chunk_total": len(chunks),
+                        "source_name": source_name or Path(file_path).name,
+                        "source_id": chunk.id,
+                        "locator": chunk.locator,
+                        "index_version": DOCUMENT_INDEX_VERSION,
+                    }
+                    for index, chunk, _ in pending
+                ],
+            )
+            existing_ids.update(chunk_id for _, _, chunk_id in pending)
+            chunks_added += len(pending)
         usage_sink["embedding_batches"] = embedding_batches
-        metadata = [
-            {
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "document_id": plan.document_id,
-                "chunk_index": index,
-                "source_name": source_name or Path(file_path).name,
-                "source_id": chunk.id,
-                "locator": chunk.locator,
-                "index_version": DOCUMENT_INDEX_VERSION,
-            }
-            for index, chunk in enumerate(chunks)
-        ]
-        self.collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=[chunk.text for chunk in chunks],
-            metadatas=metadata,
-        )
-        return len(chunks), len(chunks)
+        return len(existing_ids), chunks_added
 
     def retrieve(
         self,
