@@ -228,7 +228,10 @@ async def ask(
         except LLMCLIError as exc:
             save_error_to_log(exc)
             status_code = 500 if isinstance(exc, RequestExecutionError) else 400
-            raise HTTPException(status_code=status_code, detail=exc.message) from exc
+            detail = exc.message
+            if isinstance(exc, RequestExecutionError):
+                detail = f"{exc.message} trace_id={exc.trace_id}"
+            raise HTTPException(status_code=status_code, detail=detail) from exc
         except Exception as exc:
             logger.exception("dashboard_request_failed")
             save_error_to_log(exc)

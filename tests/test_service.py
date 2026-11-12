@@ -111,6 +111,13 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(usage["reranker_used"])
         self.assertEqual(usage["retrieval_mode"], "hybrid_rrf_reranked")
 
+    def test_context_limit_error_is_detected_through_exception_chain(self) -> None:
+        root = ValueError("input token count exceeds the maximum number of tokens")
+        wrapped = RuntimeError("provider rejected the request")
+        wrapped.__cause__ = root
+
+        self.assertTrue(AssistantService._is_context_limit_error(wrapped))
+
     def test_request_context_can_override_service_defaults(self) -> None:
         service = AssistantService(
             client=object(),

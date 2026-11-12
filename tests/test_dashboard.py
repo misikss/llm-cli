@@ -5,6 +5,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard
+from errors import RequestExecutionError
 from models import CallMetrics, LLMResponse, RouteDecision
 
 
@@ -75,6 +76,21 @@ class DashboardTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 415)
+
+    def test_request_error_exposes_trace_id(self) -> None:
+        error = RequestExecutionError(
+            "No se pudo completar la solicitud.",
+            trace_id="req_test123",
+            question="prueba",
+        )
+        with patch("dashboard._run_request", side_effect=error):
+            response = TestClient(dashboard.app).post(
+                "/api/ask",
+                data={"question": "prueba"},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("req_test123", response.json()["detail"])
 
 
 if __name__ == "__main__":

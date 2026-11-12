@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 from uuid import uuid4
 
@@ -108,6 +109,71 @@ class AssistantService:
             )
         return self._memory_registry[context]
 
+    def _controlled_document_result(
+        self,
+        request: AskRequest,
+        trace: RequestTrace,
+        route_decision: RouteDecision,
+        *,
+        route_source: str,
+        message: str,
+    ) -> AskResult:
+        """Devuelve un resultado observable cuando el archivo no es procesable todavía."""
+        response = LLMResponse(
+            answer=message,
+            confidence=0.0,
+            key_points=[
+                "El archivo excede el presupuesto seguro para análisis multimodal directo.",
+                "La indexación documental debe terminar antes de volver a consultarlo.",
+            ],
+            category="documento",
+            sources_suggested=[],
+        )
+        metrics = CallMetrics(
+            timestamp=datetime.now().isoformat(),
+            model="document-indexer",
+            question=request.question,
+            file_attached=request.file_path,
+            routed_as=route_decision.route,
+            tokens_entrada=0,
+            tokens_salida=0,
+            tokens_totales=0,
+            tarifa_input_por_millon=0.0,
+            tarifa_output_por_millon=0.0,
+            costo_entrada_usd=0.0,
+            costo_salida_usd=0.0,
+            costo_total_usd=0.0,
+            response=response.model_dump(),
+            token_usage_scope="pipeline_partial",
+        )
+        trace.apply_to_metrics(metrics, route_source=route_source)
+        return AskResult(
+            response=response,
+            metrics=metrics,
+            route_decision=route_decision,
+        )
+
+    @staticmethod
+    def _is_context_limit_error(exc: Exception) -> bool:
+        """Detecta el límite del proveedor atravesando las causas encadenadas."""
+        current: BaseException | None = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            message = str(current).lower()
+            if any(
+                marker in message
+                for marker in (
+                    "input token count exceeds",
+                    "maximum number of tokens",
+                    "context length",
+                    "too many tokens",
+                )
+            ):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     def ask(self, request: AskRequest) -> AskResult:
         question = request.question.strip()
         if not question:
@@ -185,6 +251,7 @@ class AssistantService:
                             "document_id": document_plan.document_id,
                             "file_size_bytes": document_plan.file_size_bytes,
                             "previous_queries": document_plan.previous_queries,
+                            "estimated_text_tokens": document_plan.estimated_text_tokens,
                         })
                         index_status = "not_applicable"
                         if request.file_path.lower().endswith(tuple(EXTRACTABLE_EXTENSIONS)):
@@ -201,11 +268,33 @@ class AssistantService:
                             index_status == "ready"
                             and request.file_path.lower().endswith(tuple(EXTRACTABLE_EXTENSIONS))
                         )
+                        retrieved = None
+                        if not use_document_rag and document_plan.mode == "document_rag":
+                            # Un documento que ya fue clasificado como RAG no
+                            # puede caer al multimodal: podría superar el
+                            # límite de entrada. Se espera al worker o se
+                            # construye el índice de forma síncrona como
+                            # excepción de seguridad.
+                            event["metadata"]["indexing_execution"] = "foreground_safety"
+                            retrieved = self.document_rag.retrieve(
+                                self.client,
+                                request.file_path,
+                                plan=document_plan,
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                query=question,
+                                usage_sink=document_usage,
+                                index_if_missing=True,
+                            )
+                            index_status = "ready"
+                            event["metadata"]["indexing_status"] = index_status
+
                         if use_document_rag:
                             route_decision = route_decision.model_copy(update={
                                 "document_mode": "document_rag",
                                 "document_reason": "El índice documental está listo y se reutiliza para esta consulta.",
                             })
+                        if use_document_rag and retrieved is None:
                             event["metadata"]["mode"] = "document_rag"
                             retrieved = self.document_rag.retrieve(
                                 self.client,
@@ -217,6 +306,12 @@ class AssistantService:
                                 usage_sink=document_usage,
                                 index_if_missing=False,
                             )
+                        if retrieved is not None:
+                            route_decision = route_decision.model_copy(update={
+                                "document_mode": "document_rag",
+                                "document_reason": "El índice documental está listo y se reutiliza para esta consulta.",
+                            })
+                            event["metadata"]["mode"] = "document_rag"
                             document_context = retrieved.context
                             event["metadata"].update({
                                 "chunks_indexed": retrieved.chunks_indexed,
@@ -232,7 +327,7 @@ class AssistantService:
                             event["model"] = "gemini-embedding-2"
                             event["input_tokens"] = document_usage.get("embedding_input_tokens", 0)
                             event["output_tokens"] = document_usage.get("embedding_output_tokens", 0)
-                        else:
+                        if retrieved is None:
                             if document_plan.mode == "document_rag":
                                 reason = (
                                     "El índice documental se está construyendo en segundo plano; "
@@ -244,13 +339,27 @@ class AssistantService:
                                 })
                             event["metadata"]["delivery"] = "archivo completo al modelo multimodal"
                 except Exception as exc:
-                    # Si la extracción/indexación local no está disponible, el archivo
-                    # conserva el camino multimodal original para no romper la consulta.
                     trace.add_fallback(
                         "document_rag",
-                        "Se usó análisis multimodal directo porque el retrieval documental falló.",
+                        "La indexación documental no pudo completarse.",
                         error_type=type(exc).__name__,
                     )
+                    if document_plan is not None and document_plan.mode == "document_rag":
+                        route_decision = route_decision.model_copy(update={
+                            "document_mode": "document_rag",
+                            "document_reason": "No se puede enviar el documento completo; la indexación documental falló.",
+                        })
+                        return self._controlled_document_result(
+                            request,
+                            trace,
+                            route_decision,
+                            route_source=route_source,
+                            message=(
+                                "No pude procesar todavía este documento porque supera el tamaño seguro "
+                                "para enviarlo completo y la indexación RAG no terminó. Reintenta la misma "
+                                "consulta en unos segundos para continuar con el índice híbrido."
+                            ),
+                        )
                     document_context = ""
                     document_usage = {}
                     if document_plan is not None:
@@ -315,20 +424,89 @@ class AssistantService:
                 )
 
             with trace.stage("generation") as event:
-                validated, metrics = execute_llm_call(
-                    question=question,
-                    file_path=(
-                        None
-                        if route_decision.document_mode == "document_rag"
-                        else request.file_path
-                    ),
-                    use_grounding=request.use_grounding,
-                    use_weather=request.use_weather,
-                    route_decision=route_decision,
-                    context_prefix=context_prefix,
-                    rag_tokens=rag_tokens,
-                    client=self.client,
-                )
+                try:
+                    validated, metrics = execute_llm_call(
+                        question=question,
+                        file_path=(
+                            None
+                            if route_decision.document_mode == "document_rag"
+                            else request.file_path
+                        ),
+                        use_grounding=request.use_grounding,
+                        use_weather=request.use_weather,
+                        route_decision=route_decision,
+                        context_prefix=context_prefix,
+                        rag_tokens=rag_tokens,
+                        client=self.client,
+                    )
+                except Exception as exc:
+                    can_recover_with_rag = bool(
+                        request.file_path
+                        and document_plan is not None
+                        and request.file_path.lower().endswith(tuple(EXTRACTABLE_EXTENSIONS))
+                        and route_decision.document_mode == "multimodal_direct"
+                        and self._is_context_limit_error(exc)
+                    )
+                    if not can_recover_with_rag:
+                        raise
+
+                    event["status"] = "fallback"
+                    event["metadata"]["recovered_from_context_limit"] = True
+                    trace.add_fallback(
+                        "multimodal_direct",
+                        "El proveedor rechazó el contexto; se reintentó con Document RAG.",
+                        error_type=type(exc).__name__,
+                    )
+                    try:
+                        recovered = self.document_rag.retrieve(
+                            self.client,
+                            request.file_path,
+                            plan=document_plan,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            query=question,
+                            usage_sink=document_usage,
+                            index_if_missing=True,
+                        )
+                    except Exception as recovery_exc:
+                        route_decision = route_decision.model_copy(update={
+                            "document_mode": "document_rag",
+                            "document_reason": "El contexto excedió el límite y la recuperación documental falló.",
+                        })
+                        return self._controlled_document_result(
+                            request,
+                            trace,
+                            route_decision,
+                            route_source=route_source,
+                            message=(
+                                "El documento excede el límite de contexto y todavía no pudo indexarse. "
+                                "Reintenta en unos segundos para consultar la versión RAG."
+                            ),
+                        )
+
+                    route_decision = route_decision.model_copy(update={
+                        "document_mode": "document_rag",
+                        "document_reason": "Se activó Document RAG como fallback ante el límite de contexto.",
+                    })
+                    document_context = recovered.context
+                    rag_tokens["rerank_in"] = document_usage.get("rerank_input_tokens", 0)
+                    rag_tokens["rerank_out"] = document_usage.get("rerank_output_tokens", 0)
+                    context_prefix = (
+                        "[Contexto recuperado del documento adjunto]\n"
+                        + document_context
+                        + "\n\n"
+                        + memory.get_working_memory_context()
+                    )
+                    validated, metrics = execute_llm_call(
+                        question=question,
+                        file_path=None,
+                        use_grounding=request.use_grounding,
+                        use_weather=request.use_weather,
+                        route_decision=route_decision,
+                        context_prefix=context_prefix,
+                        rag_tokens=rag_tokens,
+                        client=self.client,
+                    )
                 event["model"] = metrics.model
                 event["input_tokens"] = metrics.tokens_entrada
                 event["output_tokens"] = metrics.tokens_salida

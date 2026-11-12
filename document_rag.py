@@ -14,6 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import shutil
 import threading
@@ -25,8 +26,11 @@ from google import genai
 
 from config import (
     DOCUMENT_BM25_TOP_K,
-    DOCUMENT_EMBED_BATCH_SIZE,
+    DOCUMENT_EMBED_MAX_CHUNKS_BATCH,
+    DOCUMENT_EMBED_MAX_TOKENS_BATCH,
+    DOCUMENT_EMBED_MAX_TOKENS_PER_TEXT,
     DOCUMENT_HYBRID_TOP_K,
+    DOCUMENT_DIRECT_TOKEN_LIMIT,
     DOCUMENT_INDEX_WORKERS,
     DOCUMENT_RERANK_MIN_SCORE,
     DOCUMENT_RERANK_TOP_N,
@@ -67,6 +71,7 @@ class DocumentPlan:
     reason: str
     file_size_bytes: int
     previous_queries: int
+    estimated_text_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,6 +154,13 @@ def document_id(file_path: str | Path) -> str:
     return digest.hexdigest()[:24]
 
 
+def estimate_document_tokens(text: str) -> int:
+    """Estima tokens con margen preventivo antes de usar multimodal directo."""
+    if not text:
+        return 0
+    return math.ceil(len(text) / 3.5)
+
+
 def choose_document_plan(
     file_path: str | Path,
     *,
@@ -173,7 +185,26 @@ def choose_document_plan(
             previous_queries=previous_queries,
         )
 
-    if size_bytes > DIRECT_MAX_BYTES:
+    estimated_text_tokens = 0
+    try:
+        sections = extract_document_sections(path)
+        estimated_text_tokens = estimate_document_tokens(
+            "\n\n".join(section.text for section in sections)
+        )
+    except RetrievalError as exc:
+        logger.warning(
+            "document_token_estimate_failed error_type=%s document_id=%s",
+            type(exc).__name__,
+            doc_id,
+        )
+
+    if estimated_text_tokens > DOCUMENT_DIRECT_TOKEN_LIMIT:
+        reason = (
+            f"El texto extraído se estima en {estimated_text_tokens:,} tokens; "
+            f"se evita multimodal directo y se fuerza Document RAG."
+        )
+        mode = "document_rag"
+    elif size_bytes > DIRECT_MAX_BYTES:
         reason = "El documento supera 2 MB y se beneficia de extracción, chunks y retrieval."
         mode = "document_rag"
     elif previous_queries + 1 >= REUSE_THRESHOLD:
@@ -189,6 +220,7 @@ def choose_document_plan(
         reason=reason,
         file_size_bytes=size_bytes,
         previous_queries=previous_queries,
+        estimated_text_tokens=estimated_text_tokens,
     )
 
 
@@ -322,8 +354,12 @@ def chunk_document_sections(
 ) -> list[DocumentChunk]:
     """Fragmenta secciones y conserva un ID estable de procedencia."""
     chunks: list[DocumentChunk] = []
+    max_chars = int(DOCUMENT_EMBED_MAX_TOKENS_PER_TEXT * 3.5)
     for section in sections:
-        section_chunks = chunk_text(section.text)
+        section_chunks = chunk_text(
+            section.text,
+            size=min(CHUNK_SIZE, max_chars),
+        )
         for fragment_index, text in enumerate(section_chunks, start=1):
             locator = section.locator
             if len(section_chunks) > 1:
@@ -335,6 +371,31 @@ def chunk_document_sections(
                 locator=locator,
             ))
     return chunks
+
+
+def iter_embedding_batches(chunks: list[DocumentChunk]):
+    """Divide chunks por presupuesto de tokens y cantidad máxima por request."""
+    batch: list[DocumentChunk] = []
+    token_budget = 0
+    for chunk in chunks:
+        chunk_tokens = estimate_document_tokens(chunk.text)
+        if chunk_tokens > DOCUMENT_EMBED_MAX_TOKENS_PER_TEXT:
+            raise RetrievalError(
+                "Un chunk documental supera el límite preventivo de tokens por texto."
+            )
+        reaches_token_limit = (
+            batch
+            and token_budget + chunk_tokens > DOCUMENT_EMBED_MAX_TOKENS_BATCH
+        )
+        reaches_chunk_limit = len(batch) >= DOCUMENT_EMBED_MAX_CHUNKS_BATCH
+        if reaches_token_limit or reaches_chunk_limit:
+            yield batch
+            batch = []
+            token_budget = 0
+        batch.append(chunk)
+        token_budget += chunk_tokens
+    if batch:
+        yield batch
 
 
 class DocumentRAG:
@@ -579,6 +640,16 @@ class DocumentRAG:
         usage_sink: dict,
     ) -> list[list[float]]:
         """Solicita embeddings en lote y conserva fallback por fragmento."""
+        batch_tokens = sum(estimate_document_tokens(text) for text in texts)
+        if (
+            len(texts) > DOCUMENT_EMBED_MAX_CHUNKS_BATCH
+            or batch_tokens > DOCUMENT_EMBED_MAX_TOKENS_BATCH
+            or any(
+                estimate_document_tokens(text) > DOCUMENT_EMBED_MAX_TOKENS_PER_TEXT
+                for text in texts
+            )
+        ):
+            raise RetrievalError("El lote de embeddings supera el presupuesto preventivo.")
         try:
             response = client.models.embed_content(
                 model=self.embedding_model,
@@ -634,13 +705,15 @@ class DocumentRAG:
         ).hexdigest()[:16]
         ids = [f"doc_{scope_id}_{index}" for index in range(len(chunks))]
         embeddings: list[list[float]] = []
-        for start in range(0, len(chunks), DOCUMENT_EMBED_BATCH_SIZE):
-            batch = chunks[start : start + DOCUMENT_EMBED_BATCH_SIZE]
+        embedding_batches = 0
+        for batch in iter_embedding_batches(chunks):
+            embedding_batches += 1
             embeddings.extend(self._embed_batch(
                 client,
                 [chunk.text for chunk in batch],
                 usage_sink=usage_sink,
             ))
+        usage_sink["embedding_batches"] = embedding_batches
         metadata = [
             {
                 "user_id": user_id,
