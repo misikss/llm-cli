@@ -40,7 +40,9 @@ from config import (
     DOCUMENT_RERANK_MIN_SCORE,
     DOCUMENT_RERANK_TOP_N,
     DOCUMENT_VECTOR_TOP_K,
+    GEMINI_EMBEDDING_MODEL,
     LOG_DIR,
+    RERANKER_BACKEND,
 )
 from errors import RetrievalError
 from observability import capture_usage
@@ -433,7 +435,7 @@ class DocumentRAG:
             name="document_chunks",
             metadata={"hnsw:space": "cosine"},
         )
-        self.embedding_model = "gemini-embedding-2"
+        self.embedding_model = GEMINI_EMBEDDING_MODEL
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._bm25_indexes: dict[str, tuple[int, BM25Index]] = {}
@@ -892,7 +894,8 @@ class DocumentRAG:
             sink["rerank_output_tokens"] = sink.get("rerank_output_tokens", 0) + rerank_out
             sink["rerank_usage_available"] = rerank_usage.get("usage_available", True)
             sink["reranker_calls"] = sink.get("reranker_calls", 0) + 1
-            reranker_used = True
+            sink["reranker_backend"] = rerank_usage.get("reranker_backend", RERANKER_BACKEND)
+            reranker_used = RERANKER_BACKEND != "disabled"
             if not reranked_documents:
                 reranked_documents = hybrid_documents[:DOCUMENT_RERANK_TOP_N]
 

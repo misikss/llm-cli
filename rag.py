@@ -15,7 +15,7 @@ from rank_bm25 import BM25Okapi
 from google import genai
 from google.genai import types as genai_types
 
-from config import GEMINI_MODEL, RERANK_MIN_SCORE, RERANK_TOP_N
+from config import RERANKER_BACKEND, RERANK_MIN_SCORE, RERANK_TOP_N
 from observability import capture_usage
 
 
@@ -239,6 +239,26 @@ def hybrid_search(
 # 4. LLM RERANKING
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _local_lexical_rerank(
+    query: str,
+    documents: list[RetrievalDocument],
+    *,
+    top_n: int,
+    usage_sink: dict | None = None,
+) -> tuple[list[RetrievalDocument], int, int]:
+    """Reranking determinista para probar el pipeline sin una llamada LLM."""
+    query_terms = set(tokenize_text(query))
+    scored = []
+    for position, document in enumerate(documents):
+        document_terms = set(tokenize_text(document.text))
+        overlap = len(query_terms & document_terms)
+        scored.append((overlap, -position, document))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if usage_sink is not None:
+        usage_sink["reranker_backend"] = "lexical"
+        usage_sink["usage_available"] = True
+    return [document for _, _, document in scored[:top_n]], 0, 0
+
 def rerank_retrieval_documents(
     client: genai.Client,
     query: str,
@@ -257,6 +277,19 @@ def rerank_retrieval_documents(
 
     if len(documents) == 1:
         return documents, 0, 0
+
+    if RERANKER_BACKEND == "disabled":
+        if usage_sink is not None:
+            usage_sink["reranker_backend"] = "disabled"
+            usage_sink["usage_available"] = True
+        return documents[:top_n], 0, 0
+    if RERANKER_BACKEND == "lexical":
+        return _local_lexical_rerank(
+            query,
+            documents,
+            top_n=top_n,
+            usage_sink=usage_sink,
+        )
 
     prompt = (
         "Eres un modelo de re-ranking de alta precisión para RAG.\n"
@@ -278,6 +311,8 @@ def rerank_retrieval_documents(
         )
         res, model_name = call_with_fallback(client, prompt, config)
         usage = capture_usage(usage_sink, res, model=model_name) if usage_sink is not None else None
+        if usage_sink is not None:
+            usage_sink["reranker_backend"] = "llm"
         if usage is not None:
             t_in = usage["input_tokens"]
             t_out = usage["output_tokens"]

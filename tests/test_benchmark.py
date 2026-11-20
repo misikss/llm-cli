@@ -31,6 +31,7 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertIn("| BM25 |", report)
         self.assertIn("requieren `--live`", report)
+        self.assertIn("no faithfulness", report)
         self.assertNotIn("Híbrido RRF |", report)
 
 

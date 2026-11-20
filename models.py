@@ -140,6 +140,15 @@ class CallMetrics(BaseModel):
 
     response: dict  # La respuesta validada como dict
 
+    # Costes conocidos de etapas que ocurren fuera de la generación final.
+    # Search Grounding no se expresa como cero: depende de cuota y de cuántas
+    # búsquedas haya ejecutado la herramienta, información que no siempre
+    # devuelve el SDK.
+    costo_router_usd: float = 0.0
+    costo_memory_update_usd: float = 0.0
+    costo_embedding_usd: float = 0.0
+    costo_grounding_usd: float | None = None
+
     # Observabilidad de la solicitud completa
     event_type: Literal["llm_call"] = "llm_call"
     user_id: str = "local-user"

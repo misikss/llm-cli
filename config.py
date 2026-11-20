@@ -24,6 +24,7 @@ if not GEMINI_API_KEYS:
 
 GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else None
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 
 # Lista de modelos de respaldo en orden de prioridad ante errores 429 (Resource Exhausted / Quota Limit)
 FALLBACK_MODELS = [
@@ -43,6 +44,12 @@ ERROR_LOG_FILE = LOG_DIR / "errors.jsonl"
 # Parámetros del LLM Re-ranking
 RERANK_MIN_SCORE: float = 0.45
 RERANK_TOP_N: int = 2
+# Backend del reranker. `llm` es el camino de producción; `lexical` permite
+# probar el contrato del pipeline sin consumir llamadas generativas; `disabled`
+# deja pasar los candidatos RRF sin una segunda ordenación.
+RERANKER_BACKEND = os.getenv("RERANKER_BACKEND", "llm").strip().lower()
+if RERANKER_BACKEND not in {"llm", "lexical", "disabled"}:
+    RERANKER_BACKEND = "llm"
 
 # Parámetros de Document RAG. El reranking se activa solo cuando BM25 y la
 # búsqueda vectorial discrepan de forma relevante sobre los primeros candidatos.
@@ -60,27 +67,31 @@ DOCUMENT_EMBED_RETRIES: int = 2
 DOCUMENT_EMBED_BACKOFF_SECONDS: float = 2.0
 DOCUMENT_EMBED_MAX_BACKOFF_SECONDS: float = 60.0
 
-# Tarifas reales por modelo (USD por 1 millón de tokens)
-# Fuente: https://ai.google.dev/pricing
+# Tarifas Standard publicadas por Google (USD por 1 millón de tokens).
+# Fuente: https://ai.google.dev/gemini-api/docs/pricing
+#
+# Estas tarifas cubren el modelo y los embeddings. Search Grounding es una
+# herramienta con cuota/precio propio y no se suma aquí porque el SDK no
+# devuelve, por solicitud, el número facturable de búsquedas realizadas.
 PRECIOS_MODELO: dict[str, dict[str, float]] = {
     "gemini-2.5-flash": {
-        "input": 0.075,
-        "output": 0.30,
-        "output_thinking": 3.50,
+        "input": 0.30,
+        "output": 2.50,
+        "output_thinking": 2.50,
     },
     "gemini-2.5-flash-lite": {
-        "input": 0.075,
-        "output": 0.30,
+        "input": 0.10,
+        "output": 0.40,
         "output_thinking": 0.0,
     },
     "gemini-3.1-flash-lite": {
-        "input": 0.075,
-        "output": 0.30,
+        "input": 0.25,
+        "output": 1.50,
         "output_thinking": 0.0,
     },
     "gemini-3.5-flash-lite": {
-        "input": 0.075,
-        "output": 0.30,
+        "input": 0.30,
+        "output": 2.50,
         "output_thinking": 0.0,
     },
     "gemini-3.5-flash": {
@@ -91,7 +102,7 @@ PRECIOS_MODELO: dict[str, dict[str, float]] = {
     "gemini-2.5-pro": {
         "input": 1.25,
         "output": 10.00,
-        "output_thinking": 3.50,
+        "output_thinking": 10.00,
     },
     "gemini-2.0-flash": {
         "input": 0.075,
@@ -106,6 +117,16 @@ PRECIOS_MODELO: dict[str, dict[str, float]] = {
     "gemini-1.5-pro": {
         "input": 3.50,
         "output": 10.50,
+        "output_thinking": 0.0,
+    },
+    "gemini-embedding-2": {
+        "input": 0.20,
+        "output": 0.0,
+        "output_thinking": 0.0,
+    },
+    "gemini-embedding-001": {
+        "input": 0.15,
+        "output": 0.0,
         "output_thinking": 0.0,
     },
 }
@@ -125,4 +146,20 @@ def get_tarifas(modelo: str) -> dict[str, float]:
         if clave in modelo:
             return tarifas
     return TARIFA_DESCONOCIDA
+
+
+def cost_for_tokens(
+    model: str | None,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    thinking_tokens: int = 0,
+) -> float:
+    """Estima el coste conocido de una etapa del proveedor en USD."""
+    tarifas = get_tarifas(model or GEMINI_MODEL)
+    return (
+        (input_tokens / 1_000_000) * tarifas["input"]
+        + (output_tokens / 1_000_000) * tarifas["output"]
+        + (thinking_tokens / 1_000_000) * tarifas.get("output_thinking", 0.0)
+    )
 

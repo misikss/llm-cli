@@ -26,7 +26,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import GEMINI_API_KEY, GEMINI_MODEL  # noqa: E402
+from config import (  # noqa: E402
+    GEMINI_API_KEY,
+    GEMINI_EMBEDDING_MODEL,
+    GEMINI_MODEL,
+    RERANKER_BACKEND,
+)
 from rag import (  # noqa: E402
     BM25Index,
     RetrievalDocument,
@@ -36,7 +41,7 @@ from rag import (  # noqa: E402
 
 
 DATASET_PATH = Path(__file__).with_name("retrieval_dataset.json")
-EMBEDDING_MODEL = "gemini-embedding-2"
+EMBEDDING_MODEL = GEMINI_EMBEDDING_MODEL
 TOP_K = 3
 
 
@@ -147,10 +152,15 @@ def run_benchmark(
         embedding_ms = (time.perf_counter() - start) * 1000
 
     methods = ["BM25"]
+    reranker_method = (
+        "Híbrido + LLM reranker"
+        if RERANKER_BACKEND == "llm"
+        else f"Híbrido + reranker {RERANKER_BACKEND}"
+    )
     if live:
-        methods.extend(["Vectorial", "Híbrido RRF", "Híbrido + LLM reranker"])
+        methods.extend(["Vectorial", "Híbrido RRF", reranker_method])
         if not include_reranker:
-            methods.remove("Híbrido + LLM reranker")
+            methods.remove(reranker_method)
     method_rows: dict[str, list[dict[str, float]]] = {method: [] for method in methods}
     latencies: dict[str, list[float]] = {method: [] for method in methods}
     details: list[dict[str, Any]] = []
@@ -216,11 +226,11 @@ def run_benchmark(
             text_to_id = {document.text: document.id for document in hybrid_documents}
             reranked_ids = [text_to_id[text] for text in reranked_texts if text in text_to_id]
             rerank_ms = hybrid_ms + (time.perf_counter() - rerank_start) * 1000
-            detail["Híbrido + LLM reranker"] = reranked_ids
-            method_rows["Híbrido + LLM reranker"].append(
+            detail[reranker_method] = reranked_ids
+            method_rows[reranker_method].append(
                 retrieval_metrics(reranked_ids, relevant_ids)
             )
-            latencies["Híbrido + LLM reranker"].append(rerank_ms)
+            latencies[reranker_method].append(rerank_ms)
             rerank_tokens["input"] += tokens_in
             rerank_tokens["output"] += tokens_out
         details.append(detail)
@@ -241,6 +251,8 @@ def run_benchmark(
         "reranker_enabled": bool(live and include_reranker),
         "model": GEMINI_MODEL if live else None,
         "embedding_model": EMBEDDING_MODEL if live else None,
+        "reranker_backend": RERANKER_BACKEND if live else None,
+        "reranker_method": reranker_method if live else None,
         "queries": len(queries),
         "corpus_documents": len(documents),
         "corpus_embedding_ms": round(embedding_ms, 2),
@@ -262,6 +274,7 @@ def render_markdown(result: dict[str, Any]) -> str:
         lines.extend([
             f"- Embeddings: `{result['embedding_model']}`",
             f"- Modelo del proyecto: `{result['model']}`",
+            f"- Backend del reranker: `{result['reranker_backend']}`",
             f"- Tiempo de embeddings del corpus: `{result['corpus_embedding_ms']} ms`",
             f"- Tokens del reranker: `{result['rerank_tokens']['input']}` input / `{result['rerank_tokens']['output']}` output",
         ])
@@ -271,6 +284,8 @@ def render_markdown(result: dict[str, Any]) -> str:
         lines.append("- Nota: el modo offline ejecuta solo BM25; vectorial y LLM reranker requieren `--live`.")
 
     lines.extend([
+        "",
+        "- Nota: este benchmark evalúa retrieval, no faithfulness de la respuesta generada.",
         "",
         "## Resumen",
         "",
@@ -287,7 +302,7 @@ def render_markdown(result: dict[str, Any]) -> str:
     if result["mode"] == "live":
         lines[-1] += " | Vectorial | Híbrido RRF"
         if result["reranker_enabled"]:
-            lines[-1] += " | Híbrido + LLM reranker"
+            lines[-1] += f" | {result['reranker_method']}"
     lines[-1] += " |"
 
     separator = "|---|---|---|"
@@ -308,7 +323,7 @@ def render_markdown(result: dict[str, Any]) -> str:
                 ", ".join(detail.get("Híbrido RRF", [])),
             ])
             if result["reranker_enabled"]:
-                row.append(", ".join(detail.get("Híbrido + LLM reranker", [])))
+                row.append(", ".join(detail.get(result["reranker_method"], [])))
         lines.append("| " + " | ".join(row) + " |")
 
     return "\n".join(lines) + "\n"

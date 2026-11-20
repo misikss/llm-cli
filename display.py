@@ -128,6 +128,14 @@ def display_response(validated: LLMResponse, metrics: CallMetrics) -> None:
         table.add_row("Costo thinking", f"${metrics.costo_thinking_usd:.8f}")
     if metrics.costo_rag_overhead_usd > 0:
         table.add_row("Costo overhead RAG", f"${metrics.costo_rag_overhead_usd:.8f}")
+    if metrics.costo_router_usd > 0:
+        table.add_row("Costo semantic router", f"${metrics.costo_router_usd:.8f}")
+    if metrics.costo_memory_update_usd > 0:
+        table.add_row("Costo memory update", f"${metrics.costo_memory_update_usd:.8f}")
+    if metrics.costo_embedding_usd > 0:
+        table.add_row("Costo embeddings", f"${metrics.costo_embedding_usd:.8f}")
+    if metrics.costo_grounding_usd is None:
+        table.add_row("Costo Search Grounding", "no incluido: depende de cuota/búsquedas")
     table.add_row("Costo total", f"[bold green]${metrics.costo_total_usd:.8f} USD[/bold green]")
 
     console.print(table)

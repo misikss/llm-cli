@@ -18,7 +18,7 @@ from chromadb.config import Settings
 from google import genai
 from google.genai import types as genai_types
 
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_EMBEDDING_MODEL, GEMINI_MODEL
 from observability import capture_usage
 from rag import BM25Index, RetrievalDocument
 
@@ -64,7 +64,7 @@ class EpisodicMemory:
             name=collection_name,
             metadata={"hnsw:space": "cosine"}
         )
-        self.embedding_model = "gemini-embedding-2"
+        self.embedding_model = GEMINI_EMBEDDING_MODEL
         self._bm25_index: BM25Index | None = None
         self._bm25_doc_count = -1
         self._migrate_legacy_metadata()
@@ -349,7 +349,7 @@ class HybridMemory:
         bm25_ids = bm25_index.search(query, keywords or [], top_k=8)
 
         from rag import hybrid_search, rerank_documents
-        from config import RERANK_MIN_SCORE, RERANK_TOP_N
+        from config import RERANKER_BACKEND, RERANK_MIN_SCORE, RERANK_TOP_N
 
         hybrid_candidates = hybrid_search(
             query_text=query,
@@ -373,18 +373,27 @@ class HybridMemory:
                 )
             )
             if ranking_disagreement:
-                candidate_texts = [document.text for document in hybrid_candidates]
-                top_memories, tokens_rerank_in, tokens_rerank_out = rerank_documents(
-                    client=genai_client,
-                    query=query,
-                    documents=candidate_texts,
-                    top_n=RERANK_TOP_N,
-                    min_score=RERANK_MIN_SCORE,
-                    usage_sink=usage_sink,
-                )
-                if usage_sink is not None:
-                    usage_sink["reranker_used"] = True
-                    usage_sink["retrieval_mode"] = "hybrid_rrf_reranked"
+                if RERANKER_BACKEND == "disabled":
+                    top_memories = [
+                        document.text for document in hybrid_candidates[:RERANK_TOP_N]
+                    ]
+                    if usage_sink is not None:
+                        usage_sink["reranker_used"] = False
+                        usage_sink["reranker_backend"] = "disabled"
+                        usage_sink["retrieval_mode"] = "hybrid_rrf"
+                else:
+                    candidate_texts = [document.text for document in hybrid_candidates]
+                    top_memories, tokens_rerank_in, tokens_rerank_out = rerank_documents(
+                        client=genai_client,
+                        query=query,
+                        documents=candidate_texts,
+                        top_n=RERANK_TOP_N,
+                        min_score=RERANK_MIN_SCORE,
+                        usage_sink=usage_sink,
+                    )
+                    if usage_sink is not None:
+                        usage_sink["reranker_used"] = True
+                        usage_sink["retrieval_mode"] = "hybrid_rrf_reranked"
             else:
                 top_memories = [document.text for document in hybrid_candidates[:RERANK_TOP_N]]
                 if usage_sink is not None:
@@ -394,7 +403,7 @@ class HybridMemory:
                 recalled_text = " | ".join(top_memories)
                 label = (
                     "Recuerdos filtrados y re-rankeados de ChromaDB"
-                    if ranking_disagreement
+                    if ranking_disagreement and RERANKER_BACKEND != "disabled"
                     else "Recuerdos híbridos de ChromaDB"
                 )
                 context_parts.append(f"[{label}]: {recalled_text}")

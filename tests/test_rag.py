@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 from rag import (
     BM25Index,
     RetrievalDocument,
     hybrid_search,
     reciprocal_rank_fusion,
+    rerank_retrieval_documents,
     tokenize_text,
 )
 
@@ -53,6 +55,18 @@ class RetrievalTests(unittest.TestCase):
 
         self.assertEqual(results[0].id, "memory-1")
         self.assertEqual(len({document.id for document in results}), len(results))
+
+    def test_lexical_reranker_runs_without_llm_call(self) -> None:
+        with patch("rag.RERANKER_BACKEND", "lexical"):
+            selected, tokens_in, tokens_out = rerank_retrieval_documents(
+                client=object(),
+                query="Python Gemini-2.5-flash",
+                documents=self.documents,
+                top_n=2,
+            )
+
+        self.assertEqual([document.id for document in selected], ["memory-1", "memory-3"])
+        self.assertEqual((tokens_in, tokens_out), (0, 0))
 
 
 if __name__ == "__main__":

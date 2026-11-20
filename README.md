@@ -1,8 +1,8 @@
-# 🤖 LLM CLI — Gemini Modular con Semantic Router, Grounding y Zero-Waste RAG
+# 🤖 LLM CLI — Gemini Modular con Semantic Router, Grounding y RAG condicional
 
 [![CI](https://github.com/misikss/llm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/misikss/llm-cli/actions/workflows/ci.yml)
 
-CLI profesional de ingeniería de IA para interactuar con la API oficial de **Google Gemini (`google-genai`)**, validado con **Pydantic**, con soporte para **imágenes/audio**, **Google Search Grounding en vivo**, **consulta de clima en tiempo real (Tool Calling)**, **Semantic Routing Few-Shot** y **Advanced RAG con Gatekeeper de Costo Cero (Zero-Waste RAG)**.
+CLI profesional de ingeniería de IA para interactuar con la API oficial de **Google Gemini (`google-genai`)**, validado con **Pydantic**, con soporte para **imágenes/audio**, **Google Search Grounding en vivo**, **consulta de clima en tiempo real (Tool Calling)**, **Semantic Routing Few-Shot** y **Advanced RAG condicional**.
 
 ## 🧭 Flujo documental adaptativo
 
@@ -38,7 +38,7 @@ Las decisiones completas están documentadas en
 
 ---
 
-## 🎯 Arquitectura de Enrutamiento Inteligente (Zero-Waste RAG)
+## 🎯 Arquitectura de Enrutamiento Inteligente (RAG condicional)
 
 A diferencia de los sistemas RAG ingenuos que ejecutan reescrituras de consultas y búsquedas vectoriales a ciegas para cada frase, este sistema implementa un **Semantic Router Few-Shot** como guardián de entrada.
 
@@ -46,7 +46,7 @@ El router clasifica la intención considerando el **contexto activo de la conver
 
 ```mermaid
 flowchart TD
-    UserQuery["👤 Pregunta del Usuario"] --> RAMContext["0. Contexto de RAM (Working Memory)<br/>(Costo $0 USD)"]
+    UserQuery["👤 Pregunta del Usuario"] --> RAMContext["0. Contexto de RAM (sin llamada propia; entra al prompt)"]
     
     RAMContext --> Router["1. Semantic Router Few-Shot (determine_route)<br/>Single Source of Truth"]
     
@@ -55,7 +55,7 @@ flowchart TD
     RouteDec -- "needs_memory_rag: true<br/>('rag_memory')" --> RAGPipeline["2. Advanced RAG Pipeline (Gateado)"]
     RouteDec -- "'web_grounding'<br/>(Temas dinámicos / Estado del arte)" --> WebGrounding["Google Search Grounding<br/>(Información viva en la web)"]
     RouteDec -- "'weather'<br/>(Meteorología)" --> WeatherTool["Tool Calling (Open-Meteo API)<br/>(Sin gasto en RAG)"]
-    RouteDec -- "'general'<br/>(Lógica / Redacción / Código)" --> DirectLLM["Generación Estructurada Pydantic<br/>(Contexto RAM inmediato, $0 overhead)"]
+    RouteDec -- "'general'<br/>(Lógica / Redacción / Código)" --> DirectLLM["Generación Estructurada Pydantic<br/>(sin overhead RAG)"]
     
     subgraph RAGPipeline ["Pipeline RAG Completo (Solo cuando se necesita)"]
         QE["rewrite_query()<br/>(Desambiguación + Keywords BM25)"] --> Hybrid["Hybrid Search (BM25 + ChromaDB)"]
@@ -82,14 +82,29 @@ flowchart TD
 
 ### 🚦 Las 4 Rutas Semánticas Universales
 
-El Router no utiliza listas frágiles de palabras clave estáticas, sino comprensión contextual multitemática mediante Few-Shot Learning:
+El Router no utiliza listas frágiles de palabras clave estáticas, sino comprensión contextual multitemática mediante Few-Shot Learning. En el camino automático es una llamada LLM por consulta; por eso “sin overhead RAG” no significa “sin coste de modelo”.
 
 | Ruta | Cuándo se activa | Comportamiento | Overhead RAG |
 | :--- | :--- | :--- | :--- |
-| **`web_grounding`** | Temas dinámicos, novedades, tendencias, estado del arte o roadmaps técnicos en constante evolución (*"roadmap de AI Engineer"*, *"mejores frameworks web en 2025/2026"*). | Consulta Google Search en tiempo real y extrae fuentes verificadas. | **0 tokens ($0.00)** |
-| **`weather`** | Consultas meteorológicas de cualquier ciudad o región (*"clima en Madrid hoy"*). | Llama a la herramienta de Open-Meteo vía Tool Calling. | **0 tokens ($0.00)** |
+| **`web_grounding`** | Temas dinámicos, novedades, tendencias, estado del arte o roadmaps técnicos en constante evolución (*"roadmap de AI Engineer"*, *"mejores frameworks web en 2025/2026"*). | Consulta Google Search en tiempo real y extrae fuentes verificadas. | **No aplica RAG de memoria** |
+| **`weather`** | Consultas meteorológicas de cualquier ciudad o región (*"clima en Madrid hoy"*). | Llama a la herramienta de Open-Meteo vía Tool Calling. | **No aplica RAG de memoria** |
 | **`rag_memory`** | Peticiones explícitas de recuperar notas, acuerdos o recuerdos archivados en sesiones anteriores (*"¿recuerdas qué receta me guardaste la semana pasada?"*). | Dispara el pipeline completo: `rewrite_query` $\rightarrow$ Hybrid Search $\rightarrow$ RRF $\rightarrow$ Re-ranking. | Tokens medidos |
-| **`general`** | Conceptos atemporales, matemáticas, lógica, explicaciones teóricas, redacción o código estándar (*"qué es un decorador en Python"*, *"cómo funciona la fotosíntesis"*). | Responde directamente con el contexto inmediato de la Working Memory. | **0 tokens ($0.00)** |
+| **`general`** | Conceptos atemporales, matemáticas, lógica, explicaciones teóricas, redacción o código estándar (*"qué es un decorador en Python"*, *"cómo funciona la fotosíntesis"*). | Responde directamente con el contexto inmediato de la Working Memory. | **No aplica RAG de memoria** |
+
+`Overhead RAG` solo describe trabajo adicional de recuperación. Todas las rutas
+automáticas pueden incluir el coste del router, la generación final y la
+actualización de memoria; esos importes se registran por separado en las
+métricas. `web_grounding` además tiene una tarifa/cuota de herramienta propia,
+que depende de la cuenta y de las búsquedas realizadas, y no se presenta como
+`$0.00`.
+
+Según la [tabla oficial de precios de Gemini](https://ai.google.dev/gemini-api/docs/pricing),
+para Gemini 2.5 Search Grounding incluye hasta 1.500 prompts grounded por día
+sin cargo adicional y después cuesta USD 35 por 1.000 prompts; la misma página
+aclara que una solicitud puede generar una o varias búsquedas. Gemini Embedding
+2 se tarifa aparte del modelo generativo. Estas cifras pueden cambiar por
+modelo, tier y fecha, así que el coste por solicitud de Grounding no se estima
+como cero en este proyecto.
 
 ---
 
@@ -105,10 +120,14 @@ Cuando una consulta requiere memoria histórica (`rag_memory`), se activan los t
    - Fusión mediante Reciprocal Rank Fusion:
      $$RRF\_Score(d) = \sum_{m \in M} \frac{1}{60 + r_m(d)}$$
 3. **LLM Re-ranking condicional (`rerank_documents`)**:
-   - Emplea `gemini-2.5-flash-lite` con Structured Output para evaluar la relevancia exacta de cada fragmento.
+   - Emplea el modelo configurado (`GEMINI_MODEL`) con Structured Output para evaluar la relevancia exacta de cada fragmento.
    - Es un reranker basado en LLM, no un Cross-Encoder local; evita cargar otro modelo en RAM.
    - Solo se ejecuta cuando los rankings BM25 y vectorial discrepan en sus candidatos principales.
    - Parámetros centralizados en `config.py`: `RERANK_MIN_SCORE = 0.45` y `RERANK_TOP_N = 2`.
+   - `RERANKER_BACKEND=llm` es el camino que debe medirse para la tesis;
+     `lexical` permite probar la arquitectura sin llamadas generativas y
+     `disabled` deja el resultado RRF intacto. Un resultado lexical no es
+     evidencia del LLM reranker.
 
 ### 📄 Document RAG híbrido
 
@@ -143,6 +162,11 @@ extraído. Con un presupuesto preventivo de 350.000 tokens fuerza Document RAG
 antes de llegar al límite de 1.048.576 tokens del proveedor. Los embeddings se
 agrupan con doble presupuesto: máximo 15.000 tokens y 64 chunks por request;
 ningún chunk supera 6.000 tokens.
+
+El modelo de embeddings se puede cambiar con `GEMINI_EMBEDDING_MODEL` sin
+modificar el pipeline. La indexación persiste cada lote y reanuda después de
+un `429`, por lo que una cuota gratuita limitada deja un índice parcial
+recuperable en vez de obligar a empezar desde cero.
 
 ### Prueba de estrés documental
 
@@ -195,7 +219,20 @@ python benchmarks/retrieval_benchmark.py --live --skip-reranker
 
 Reporta `Hit@1`, `Hit@3`, `MRR@3`, latencia media y tokens usados por el reranker. El benchmark no aplica query rewriting para aislar la calidad del retrieval.
 
-Reportes generados: [`results-live-no-reranker.md`](benchmarks/results-live-no-reranker.md) y [`results-offline.md`](benchmarks/results-offline.md).
+El reporte live versionado [`results-live-no-reranker.md`](benchmarks/results-live-no-reranker.md)
+fue generado con `--skip-reranker`: contiene números de embeddings/RRF, pero no
+demuestra ninguna mejora del reranker. No se afirma ese uplift hasta publicar
+una corrida con `RERANKER_BACKEND=llm` y el reranker realmente habilitado.
+
+### Qué todavía no mide este benchmark
+
+Esto es una evaluación de retrieval, no de faithfulness de la respuesta final.
+No comprueba que cada afirmación generada esté respaldada por los chunks
+recuperados, que las citas apunten a la fuente correcta ni que la respuesta no
+introduzca hechos externos. Para sostener esa tesis hace falta un segundo
+dataset con respuestas/claims anotados y un reporte separado de soporte de
+claims, precisión/recall de citas y completitud. Hasta tenerlo, los números
+publicados solo respaldan la calidad del ranking.
 
 La vista arquitectónica completa está en [`docs/architecture.md`](docs/architecture.md).
 
@@ -223,7 +260,7 @@ llm-cli/
 ├── docs/architecture.md ← Diagrama de flujo y decisiones de arquitectura
 ├── docs/architecture-decisions.md ← Registro ADR en español
 ├── tests/              ← Tests unitarios del retrieval
-├── .env                ← Variables de entorno (GEMINI_API_KEY, GEMINI_MODEL)
+├── .env                ← Variables de entorno (GEMINI_API_KEY, GEMINI_MODEL, GEMINI_EMBEDDING_MODEL, RERANKER_BACKEND)
 ├── requirements.txt    ← Dependencias necesarias
 ├── requirements-dev.txt ← Dependencias de desarrollo y pytest
 └── chroma_db/          ← Base de datos vectorial persistente con embeddings
@@ -272,7 +309,7 @@ python llm_cli.py
 # 1. Detecta automáticamente que requiere estado del arte y activa Google Grounding:
 python llm_cli.py -q "me armas un roadmap de AI engineer"
 
-# 2. Detecta que es un concepto atemporal y responde directo (0 tokens de overhead RAG):
+# 2. Detecta que es un concepto atemporal y responde directo (sin overhead RAG adicional):
 python llm_cli.py -q "¿Qué es un decorador en Python?"
 
 # 3. Detecta consulta meteorológica y ejecuta la tool de clima:
@@ -346,4 +383,7 @@ Cada llamada registra en [`logs/history.jsonl`](file:///c:/Users/victor/Download
 - Cantidad de llamadas de embedding y sus tokens cuando el SDK expone `usage_metadata`.
 - `token_usage_scope`: `pipeline` cuando todas las etapas reportan usage, o `pipeline_partial` cuando el proveedor no expone tokens de alguna etapa.
 - La latencia se desglosa por etapa para distinguir costo de API, retrieval local y persistencia.
-- El overhead RAG sigue siendo **0 tokens** para rutas que no activan memoria episódica, aunque el router y la actualización de memoria pueden realizar llamadas propias.
+- El campo `costo_total_usd` suma la generación final, el overhead RAG, el
+  router, la actualización de memoria y los embeddings cuando el proveedor
+  expone uso. Search Grounding queda marcado como coste externo no cuantificado
+  por solicitud; no se presenta como `$0.00`.

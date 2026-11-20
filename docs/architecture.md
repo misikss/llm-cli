@@ -81,6 +81,22 @@ vectorial discrepan, tanto en Document RAG como en la memoria episódica. Las
 consultas con resultados claramente alineados usan RRF directamente para no
 añadir una llamada innecesaria al proveedor.
 
+El contrato del reranker está aislado en `rag.rerank_retrieval_documents` y
+acepta tres backends mediante `RERANKER_BACKEND`:
+
+- `llm`: reordena con Structured Output de Gemini. Es el backend que debe
+  compararse para sostener una tesis sobre LLM reranking y requiere cuota de
+  generación.
+- `lexical`: reordenación determinista por solapamiento de términos. No prueba
+  la calidad del LLM, pero permite validar integración, trazas y límites sin
+  consumir llamadas generativas.
+- `disabled`: conserva los candidatos RRF y no hace una segunda ordenación.
+
+Los embeddings y el reranker son costes distintos: el primero usa
+`gemini-embedding-2` y el segundo usa una llamada generativa solo cuando la
+puerta de discrepancia se abre. Si la cuota impide usar `llm`, se debe reportar
+esa corrida como `lexical` o `disabled`, nunca como evidencia del reranker LLM.
+
 La indexación documental es asíncrona. `DocumentRAG` mantiene un worker local
 con estados `queued`, `running`, `ready` y `failed`; los embeddings de un
 documento se solicitan en lotes. Mientras el índice no está listo, el servicio
@@ -137,6 +153,11 @@ preventivo de 6.000 tokens por chunk.
   `session_id` se conserva para trazabilidad y para separar la Working Memory.
 - Cada solicitud produce un `trace_id` con etapas, errores sanitizados,
   fallbacks, tokens, coste y latencia.
+- `costo_total_usd` incluye las etapas de modelo y embedding cuyo uso se pudo
+  observar: generación, overhead RAG, router, actualización de memoria y
+  embeddings. Search Grounding queda como coste externo no cuantificado por
+  solicitud porque su facturación depende de cuota y búsquedas de la
+  herramienta.
 - No se añade LangGraph en esta entrega. La orquestación sigue siendo síncrona
   y explícita; solo la indexación documental se ejecuta en un worker de fondo
   para no bloquear la respuesta.
@@ -146,6 +167,22 @@ preventivo de 6.000 tokens por chunk.
 El benchmark versionado en `benchmarks/` compara BM25, búsqueda vectorial,
 híbrido RRF y el híbrido con LLM reranker usando Hit@1, Hit@3, MRR@3 y
 latencia.
+
+El artefacto live actualmente publicado usa `--skip-reranker`; por eso no
+contiene un resultado del componente central. La orden para producirlo, cuando
+la cuota esté disponible, es:
+
+```bash
+# En .env: RERANKER_BACKEND=llm
+python benchmarks/retrieval_benchmark.py --live \
+  --output benchmarks/results-live-reranker.md
+```
+
+Ese benchmark sigue siendo retrieval-only. No evalúa faithfulness de la
+respuesta final. Para esa afirmación hace falta un conjunto adicional de
+preguntas, claims y fuentes esperadas, y medir al menos soporte de claims,
+precisión/recall de citas y completitud. Los resultados actuales no deben
+presentarse como evaluación de faithfulness.
 
 ```mermaid
 flowchart LR

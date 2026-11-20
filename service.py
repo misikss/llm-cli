@@ -10,7 +10,7 @@ from uuid import uuid4
 from google import genai
 
 from client import determine_route, execute_llm_call
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_MODEL, cost_for_tokens
 from errors import ConfigurationError, InvalidRequestError, RequestExecutionError
 from document_rag import EXTRACTABLE_EXTENSIONS, DocumentRAG, choose_document_plan
 from memory import HybridMemory
@@ -63,7 +63,8 @@ class AssistantService:
         self.session_id = session_id or f"sess_{uuid4().hex[:12]}"
         self.conversation_id = conversation_id
         self._memory_registry: dict[tuple[str, str, str], HybridMemory] = {}
-        self.document_rag = DocumentRAG(db_path=db_path)
+        self._document_db_path = db_path
+        self.document_rag: DocumentRAG | None = None
         self.memory = memory or self._create_memory(
             user_id=self.user_id,
             session_id=self.session_id,
@@ -74,6 +75,12 @@ class AssistantService:
             self.session_id,
             self.conversation_id,
         )] = self.memory
+
+    def _get_document_rag(self) -> DocumentRAG:
+        """Abre Chroma solo cuando la solicitud realmente usa Document RAG."""
+        if self.document_rag is None:
+            self.document_rag = DocumentRAG(db_path=self._document_db_path)
+        return self.document_rag
 
     @staticmethod
     def _memory_key(user_id: str, session_id: str, conversation_id: str) -> tuple[str, str, str]:
@@ -255,7 +262,7 @@ class AssistantService:
                         })
                         index_status = "not_applicable"
                         if request.file_path.lower().endswith(tuple(EXTRACTABLE_EXTENSIONS)):
-                            index_status = self.document_rag.queue_indexing(
+                            index_status = self._get_document_rag().queue_indexing(
                                 self.client,
                                 request.file_path,
                                 plan=document_plan,
@@ -297,7 +304,7 @@ class AssistantService:
                             })
                         if use_document_rag and retrieved is None:
                             event["metadata"]["mode"] = "document_rag"
-                            retrieved = self.document_rag.retrieve(
+                            retrieved = self._get_document_rag().retrieve(
                                 self.client,
                                 request.file_path,
                                 plan=document_plan,
@@ -459,7 +466,7 @@ class AssistantService:
                         error_type=type(exc).__name__,
                     )
                     try:
-                        recovered = self.document_rag.retrieve(
+                        recovered = self._get_document_rag().retrieve(
                             self.client,
                             request.file_path,
                             plan=document_plan,
@@ -571,6 +578,52 @@ class AssistantService:
                 + metrics.tokens_memory_update_out
                 + metrics.tokens_embedding_in
                 + metrics.tokens_embedding_out
+            )
+
+            # `execute_llm_call` conoce la generación final y el overhead RAG,
+            # pero el servicio también ejecuta etapas LLM/embedding propias.
+            # Se suman aquí para que el coste total no presente el router ni la
+            # actualización de memoria como si fueran gratuitos.
+            metrics.costo_router_usd = round(
+                cost_for_tokens(
+                    route_usage.get("model"),
+                    input_tokens=metrics.tokens_router_in,
+                    output_tokens=metrics.tokens_router_out,
+                ),
+                8,
+            )
+            metrics.costo_memory_update_usd = round(
+                cost_for_tokens(
+                    memory_usage.get("llm_model"),
+                    input_tokens=metrics.tokens_memory_update_in,
+                    output_tokens=metrics.tokens_memory_update_out,
+                ),
+                8,
+            )
+            embedding_model = (
+                retrieval_usage.get("embedding_model")
+                or memory_usage.get("embedding_model")
+                or document_usage.get("embedding_model")
+            )
+            metrics.costo_embedding_usd = round(
+                cost_for_tokens(
+                    embedding_model or "gemini-embedding-2",
+                    input_tokens=metrics.tokens_embedding_in,
+                    output_tokens=metrics.tokens_embedding_out,
+                ),
+                8,
+            )
+            known_stage_cost = (
+                metrics.costo_router_usd
+                + metrics.costo_memory_update_usd
+                + metrics.costo_embedding_usd
+            )
+            metrics.costo_total_usd = round(
+                metrics.costo_total_usd + known_stage_cost,
+                8,
+            )
+            metrics.costo_grounding_usd = (
+                None if route_decision.route == "web_grounding" else 0.0
             )
             usage_available = all([
                 route_usage.get("usage_available", True),
