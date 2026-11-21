@@ -60,7 +60,10 @@
                   <span class="drop-title">Arrastra o selecciona un archivo</span>
                   <span class="drop-subtitle">PDF · XLSX · CSV · imágenes · audio · DOCX</span>
                 </label>
-                <div class="file-preview" id="file-preview" hidden></div>
+                <div class="file-preview" id="file-preview" aria-live="polite" hidden>
+                  <span class="file-name" id="file-name"></span>
+                  <button class="clear-file-button" id="clear-file" type="button" aria-label="Quitar archivo adjunto">Quitar</button>
+                </div>
               </div>
 
               <div class="field-group scope-group">

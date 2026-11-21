@@ -115,13 +115,19 @@ function resetTelemetry() {
 
 function renderFilePreview(file) {
   const preview = $("#file-preview");
+  const fileName = $("#file-name");
   if (!file) {
     preview.hidden = true;
-    preview.textContent = "";
+    fileName.textContent = "";
     return;
   }
   preview.hidden = false;
-  preview.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+  fileName.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function clearAttachment() {
+  $("#file").value = "";
+  renderFilePreview(null);
 }
 
 function renderResponse(payload) {
@@ -308,6 +314,7 @@ function setupUpload() {
   const dropzone = $("#dropzone");
   const input = $("#file");
   input.addEventListener("change", () => renderFilePreview(input.files[0]));
+  $("#clear-file").addEventListener("click", clearAttachment);
   ["dragenter", "dragover"].forEach((eventName) => dropzone.addEventListener(eventName, (event) => {
     event.preventDefault();
     dropzone.classList.add("dragging");
@@ -327,6 +334,7 @@ function setupUpload() {
 function newConversation() {
   const conversationId = makeId("conv");
   $("#conversation-id").value = conversationId;
+  clearAttachment();
   persistScope();
   resetTelemetry();
   refreshHistory();

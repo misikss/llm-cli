@@ -176,8 +176,11 @@ textarea:focus, .input-with-prefix input:focus { border-color: var(--mint); box-
 .drop-icon { font-size: 25px; line-height: 1; color: var(--orange); }
 .drop-title { color: var(--text); font-size: 12px; }
 .drop-subtitle { color: var(--faint); font: 9px var(--mono); }
-.file-preview { margin-top: 8px; padding: 8px 10px; background: var(--surface-3); color: var(--mint); font: 10px var(--mono); overflow-wrap: anywhere; }
+.file-preview { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; background: var(--surface-3); color: var(--mint); font: 10px var(--mono); overflow-wrap: anywhere; }
 .file-preview::before { content: "ATTACHED / "; color: var(--orange); }
+.file-name { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.clear-file-button { flex: 0 0 auto; border: 1px solid rgba(255, 177, 120, 0.45); border-radius: 3px; padding: 4px 7px; color: var(--orange); background: transparent; font: 9px var(--mono); cursor: pointer; }
+.clear-file-button:hover { border-color: var(--orange); color: var(--text); background: rgba(255, 177, 120, 0.08); }
 .input-with-prefix { display: grid; grid-template-columns: 47px 1fr; margin-top: 6px; }
 .input-with-prefix span { display: grid; place-items: center start; padding-left: 9px; border: 1px solid var(--line); border-right: 0; color: var(--faint); font: 9px var(--mono); }
 .input-with-prefix input { border-radius: 0 3px 3px 0; padding: 9px 10px; font: 11px var(--mono); }

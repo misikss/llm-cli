@@ -60,7 +60,12 @@ DIRECT_MAX_BYTES = 2 * 1024 * 1024
 REUSE_THRESHOLD = 3
 CHUNK_SIZE = 1_800
 CHUNK_OVERLAP = 250
-DOCUMENT_INDEX_VERSION = 2
+# The legacy collection was created with an older Chroma configuration whose
+# persisted JSON lacks the `_type` marker expected by current Chroma versions.
+# Keep it untouched and start a versioned document index instead of requiring a
+# destructive reset of the local database.
+DOCUMENT_COLLECTION_NAME = "document_chunks_v2"
+DOCUMENT_INDEX_VERSION = 3
 REGISTRY_PATH = LOG_DIR / "document_registry.json"
 
 EXTRACTABLE_EXTENSIONS = {".txt", ".csv", ".tsv", ".xlsx", ".xls", ".pdf", ".docx"}
@@ -432,7 +437,7 @@ class DocumentRAG:
             settings=Settings(anonymized_telemetry=False),
         )
         self.collection = client.get_or_create_collection(
-            name="document_chunks",
+            name=DOCUMENT_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
         self.embedding_model = GEMINI_EMBEDDING_MODEL
