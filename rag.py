@@ -256,6 +256,7 @@ def _local_lexical_rerank(
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     if usage_sink is not None:
         usage_sink["reranker_backend"] = "lexical"
+        usage_sink["reranker_status"] = "ok"
         usage_sink["usage_available"] = True
     return [document for _, _, document in scored[:top_n]], 0, 0
 
@@ -281,6 +282,7 @@ def rerank_retrieval_documents(
     if RERANKER_BACKEND == "disabled":
         if usage_sink is not None:
             usage_sink["reranker_backend"] = "disabled"
+            usage_sink["reranker_status"] = "bypassed"
             usage_sink["usage_available"] = True
         return documents[:top_n], 0, 0
     if RERANKER_BACKEND == "lexical":
@@ -304,6 +306,9 @@ def rerank_retrieval_documents(
 
     try:
         from client import call_with_fallback
+        if usage_sink is not None:
+            usage_sink["reranker_backend"] = "llm"
+            usage_sink["reranker_status"] = "attempted"
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=RerankResult,
@@ -313,6 +318,7 @@ def rerank_retrieval_documents(
         usage = capture_usage(usage_sink, res, model=model_name) if usage_sink is not None else None
         if usage_sink is not None:
             usage_sink["reranker_backend"] = "llm"
+            usage_sink["reranker_status"] = "ok" if res.parsed else "fallback"
         if usage is not None:
             t_in = usage["input_tokens"]
             t_out = usage["output_tokens"]
@@ -337,13 +343,17 @@ def rerank_retrieval_documents(
                     seen_indexes.add(item.index)
             return selected[:top_n], t_in, t_out
     except Exception as exc:
+        if usage_sink is not None:
+            usage_sink["reranker_status"] = "fallback"
         logger.warning(
             "llm_reranker_fallback error_type=%s candidates=%s",
             type(exc).__name__,
             len(documents),
         )
 
-    # Fallback si falla el reranker: retornar los primeros candidatos
+    # Fallback si falla el reranker: retornar los primeros candidatos.
+    if usage_sink is not None:
+        usage_sink["reranker_status"] = "fallback"
     return documents[:top_n], 0, 0
 
 

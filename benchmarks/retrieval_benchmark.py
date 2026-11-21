@@ -165,6 +165,7 @@ def run_benchmark(
     latencies: dict[str, list[float]] = {method: [] for method in methods}
     details: list[dict[str, Any]] = []
     rerank_tokens = {"input": 0, "output": 0}
+    rerank_status = {"ok": 0, "fallback": 0, "bypassed": 0, "unknown": 0}
 
     for query in queries:
         question = query["question"]
@@ -216,13 +217,17 @@ def run_benchmark(
 
         if include_reranker:
             rerank_start = time.perf_counter()
+            rerank_usage: dict[str, Any] = {}
             reranked_texts, tokens_in, tokens_out = rerank_documents(
                 client=client,
                 query=question,
                 documents=[document.text for document in hybrid_documents],
                 top_n=TOP_K,
                 min_score=0.0,
+                usage_sink=rerank_usage,
             )
+            status = rerank_usage.get("reranker_status", "unknown")
+            rerank_status[status] = rerank_status.get(status, 0) + 1
             text_to_id = {document.text: document.id for document in hybrid_documents}
             reranked_ids = [text_to_id[text] for text in reranked_texts if text in text_to_id]
             rerank_ms = hybrid_ms + (time.perf_counter() - rerank_start) * 1000
@@ -257,6 +262,7 @@ def run_benchmark(
         "corpus_documents": len(documents),
         "corpus_embedding_ms": round(embedding_ms, 2),
         "rerank_tokens": rerank_tokens,
+        "rerank_status": rerank_status,
         "summary": summary,
         "details": details,
     }
@@ -277,6 +283,7 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"- Backend del reranker: `{result['reranker_backend']}`",
             f"- Tiempo de embeddings del corpus: `{result['corpus_embedding_ms']} ms`",
             f"- Tokens del reranker: `{result['rerank_tokens']['input']}` input / `{result['rerank_tokens']['output']}` output",
+            f"- Estado del reranker: `{result['rerank_status']}`",
         ])
         if not result["reranker_enabled"]:
             lines.append("- Nota: el LLM reranker fue omitido con `--skip-reranker`.")

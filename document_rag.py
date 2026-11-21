@@ -895,6 +895,7 @@ class DocumentRAG:
             sink["rerank_usage_available"] = rerank_usage.get("usage_available", True)
             sink["reranker_calls"] = sink.get("reranker_calls", 0) + 1
             sink["reranker_backend"] = rerank_usage.get("reranker_backend", RERANKER_BACKEND)
+            sink["reranker_status"] = rerank_usage.get("reranker_status", "unknown")
             reranker_used = RERANKER_BACKEND != "disabled"
             if not reranked_documents:
                 reranked_documents = hybrid_documents[:DOCUMENT_RERANK_TOP_N]

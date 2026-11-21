@@ -184,6 +184,12 @@ preguntas, claims y fuentes esperadas, y medir al menos soporte de claims,
 precisión/recall de citas y completitud. Los resultados actuales no deben
 presentarse como evaluación de faithfulness.
 
+El arnés `benchmarks/faithfulness_benchmark.py` deja esa evaluación lista sin
+acoplarla al proveedor: recibe respuestas JSONL con claims y `source_ids`,
+pero exige que `supported` haya sido anotado por una persona o por un juez LLM.
+Así se puede producir un reporte reproducible sin confundir una heurística con
+una medición de faithfulness.
+
 ```mermaid
 flowchart LR
     Dataset["Dataset versionado<br/>corpus + relevancia esperada"] --> BM25Eval["BM25"]

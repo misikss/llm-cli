@@ -221,8 +221,16 @@ Reporta `Hit@1`, `Hit@3`, `MRR@3`, latencia media y tokens usados por el reranke
 
 El reporte live versionado [`results-live-no-reranker.md`](benchmarks/results-live-no-reranker.md)
 fue generado con `--skip-reranker`: contiene números de embeddings/RRF, pero no
-demuestra ninguna mejora del reranker. No se afirma ese uplift hasta publicar
-una corrida con `RERANKER_BACKEND=llm` y el reranker realmente habilitado.
+demuestra ninguna mejora del reranker. La corrida con el reranker habilitado se
+publica abajo por separado.
+
+Ya existe una corrida live con el reranker habilitado en
+[`results-live-reranker.md`](benchmarks/results-live-reranker.md). En ese
+dataset, Híbrido RRF y Híbrido + LLM reranker empatan en `Hit@1=1.000`,
+`Hit@3=1.000` y `MRR@3=1.000`; el reranker no mejora el ranking y eleva la
+latencia media de aproximadamente `517 ms` a `19.879 s`. La ejecución mostró
+avisos transitorios/de cuota, por lo que el reporte debe leerse como una
+corrida mixta con fallback observable, no como una prueba limpia de superioridad.
 
 ### Qué todavía no mide este benchmark
 
@@ -233,6 +241,12 @@ introduzca hechos externos. Para sostener esa tesis hace falta un segundo
 dataset con respuestas/claims anotados y un reporte separado de soporte de
 claims, precisión/recall de citas y completitud. Hasta tenerlo, los números
 publicados solo respaldan la calidad del ranking.
+
+El arnés reproducible para la segunda evaluación está en
+[`faithfulness_benchmark.py`](benchmarks/faithfulness_benchmark.py). Recibe un
+JSONL de respuestas anotadas por claim y fuente y calcula soporte de claims,
+unsupported claims y precisión/recall de citas; no genera etiquetas falsas si
+todavía no existe esa anotación.
 
 La vista arquitectónica completa está en [`docs/architecture.md`](docs/architecture.md).
 
